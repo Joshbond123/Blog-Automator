@@ -781,16 +781,20 @@ const Settings = () => {
 
   const fetchData = async () => {
     try {
-      const [setRes, fbRes] = await Promise.all([
+      const [setRes, fbRes, statusRes] = await Promise.all([
         fetch('/api/settings').then(r => r.ok ? r.json() : {} as any),
-        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : [])
+        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : []),
+        fetch('/api/supabase/status').then(r => r.ok ? r.json() : null)
       ]);
       setSettings(setRes);
       setFbPages(fbRes);
-      
-      // Auto-verify Supabase if credentials exist
-      if (setRes && (setRes as any).supabase_url && (setRes as any).supabase_service_role_key) {
-        verifySupabase((setRes as any).supabase_url, (setRes as any).supabase_service_role_key);
+
+      if (statusRes?.connected) {
+        setSupabaseStatus('connected');
+      } else if (statusRes?.configured) {
+        setSupabaseStatus('error');
+      } else {
+        setSupabaseStatus('idle');
       }
     } catch (err) {
       console.error(err);
@@ -843,13 +847,14 @@ const Settings = () => {
       
       // If we just saved Supabase settings, re-verify status
       if (section === 'supabase') {
+        const hasManualCredentials = Boolean(data.supabase_url && data.supabase_service_role_key);
         const verifyRes = await fetch('/api/settings/verify-supabase', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          body: JSON.stringify(hasManualCredentials ? {
             url: data.supabase_url,
             service_role_key: data.supabase_service_role_key
-          })
+          } : {})
         });
         if (verifyRes.ok) setSupabaseStatus('connected');
         else setSupabaseStatus('error');
@@ -867,24 +872,22 @@ const Settings = () => {
     if (!fbToken) return;
     setFetchingFb(true);
     try {
-      // Simulate fetching pages from FB Graph API
-      const res = await fetch('/api/facebook/verify-token', {
+      const res = await fetch('/api/facebook/pages-from-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: fbToken })
       });
       
       if (res.ok) {
-        // In a real app, this would return the actual pages
-        // For now, we'll simulate a list of pages found for this token
-        setFetchedFbPages([
-          { id: 'ext_1', name: 'Tech News Daily', category: 'Technology' },
-          { id: 'ext_2', name: 'Life Hacks Pro', category: 'Lifestyle' },
-          { id: 'ext_3', name: 'Mystery World', category: 'Entertainment' }
-        ]);
+        const payload = await res.json();
+        setFetchedFbPages(payload.pages || []);
+      } else {
+        const errorPayload = await res.json();
+        throw new Error(errorPayload.error || 'Failed to fetch Facebook pages');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setError(err.message || 'Failed to fetch Facebook pages');
     } finally {
       setFetchingFb(false);
     }
@@ -898,7 +901,7 @@ const Settings = () => {
         body: JSON.stringify({
           page_id: page.id,
           name: page.name,
-          access_token: fbToken,
+          access_token: page.access_token || fbToken,
           status: 'valid'
         })
       });
@@ -912,13 +915,19 @@ const Settings = () => {
   };
 
   const deleteFbPage = async (id: string) => {
-    // In a real app, we'd have a DELETE endpoint
-    // For now, we'll just filter it out locally or add a delete API
-    setFbPages(prev => prev.filter(p => p.id !== id));
+    try {
+      const res = await fetch(`/api/facebook-pages/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const menuItems = [
     { id: 'supabase', label: 'Supabase', icon: Database },
+    { id: 'blogger-oauth', label: 'Blogger OAuth Credentials', icon: KeyIcon },
     { id: 'github', label: 'GitHub', icon: Github },
     { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
     { id: 'facebook', label: 'Facebook', icon: Facebook },
@@ -1007,7 +1016,12 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS elevenlabs_keys JSONB DEFAULT '[]'
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS lightning_keys JSONB DEFAULT '[]';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_url TEXT;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_service_role_key TEXT;
-ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS blogger_client_id TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS blogger_client_secret TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS blogger_refresh_token TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_html TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     </pre>
                   </div>
                 )}
@@ -1090,6 +1104,72 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                       Saving will verify the connection and store credentials in your database.
                     </p>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {activeSubTab === 'blogger-oauth' && (
+              <div className="space-y-8">
+                <div>
+                  <h3 className="text-3xl font-bold text-white tracking-tight">Blogger OAuth Credentials</h3>
+                  <p className="text-zinc-400 mt-2 text-lg">Global OAuth credentials used for all Blogger connections and publishing.</p>
+                </div>
+
+                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                  <div className="space-y-3">
+                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Client ID</label>
+                    <div className="relative group">
+                      <KeyIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
+                      <input
+                        type="text"
+                        value={settings.blogger_client_id || ''}
+                        onChange={(e) => setSettings({ ...settings, blogger_client_id: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg"
+                        placeholder="Google OAuth Client ID"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Client Secret</label>
+                    <div className="relative group">
+                      <Shield className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
+                      <input
+                        type="password"
+                        value={settings.blogger_client_secret || ''}
+                        onChange={(e) => setSettings({ ...settings, blogger_client_secret: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg"
+                        placeholder="Google OAuth Client Secret"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Refresh Token</label>
+                    <div className="relative group">
+                      <RefreshCw className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
+                      <input
+                        type="password"
+                        value={settings.blogger_refresh_token || ''}
+                        onChange={(e) => setSettings({ ...settings, blogger_refresh_token: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg"
+                        placeholder="Blogger OAuth Refresh Token"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => saveSection('blogger-oauth', {
+                      blogger_client_id: settings.blogger_client_id,
+                      blogger_client_secret: settings.blogger_client_secret,
+                      blogger_refresh_token: settings.blogger_refresh_token
+                    })}
+                    disabled={saving === 'blogger-oauth'}
+                    className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-xl shadow-indigo-500/20 disabled:opacity-50 text-lg flex items-center justify-center gap-3"
+                  >
+                    {saving === 'blogger-oauth' ? <RefreshCw className="w-6 h-6 animate-spin" /> : <Save className="w-6 h-6" />}
+                    Save Blogger OAuth Credentials
+                  </button>
                 </div>
               </div>
             )}

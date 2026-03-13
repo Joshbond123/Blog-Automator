@@ -2,6 +2,7 @@ import axios from 'axios';
 import FormData from 'form-data';
 import { getSupabase } from './supabase-backend';
 import dotenv from 'dotenv';
+import { decryptSecret } from './secrets';
 
 dotenv.config();
 
@@ -10,7 +11,17 @@ dotenv.config();
 async function getSettings() {
   const supabase = getSupabase();
   const { data } = await supabase.from('settings').select('*').single();
-  return data || {};
+  const settings = data || {};
+
+  if (!settings.cloudflare_configs && settings.cloudflare_api_keys && settings.cloudflare_account_id) {
+    settings.cloudflare_configs = String(settings.cloudflare_api_keys)
+      .split(',')
+      .map((key: string) => key.trim())
+      .filter(Boolean)
+      .map((key: string) => ({ account_id: settings.cloudflare_account_id, key }));
+  }
+
+  return settings;
 }
 
 async function uploadToCatbox(fileBuffer: Buffer, fileName: string) {
@@ -28,19 +39,21 @@ async function uploadToCatbox(fileBuffer: Buffer, fileName: string) {
 
 // --- AI Generation ---
 
-async function getRotatedKey(keysString: string) {
-  const keys = (keysString || '').split(',').map(k => k.trim()).filter(k => k);
+async function getRotatedKey(keysInput: string | Array<{ key: string }> | undefined) {
+  const keys = Array.isArray(keysInput)
+    ? keysInput.map(item => item?.key).filter(Boolean)
+    : (keysInput || '').split(',').map(k => k.trim()).filter(k => k);
   if (keys.length === 0) return null;
   return keys[Math.floor(Math.random() * keys.length)];
 }
 
 async function generateText(prompt: string, niche: string) {
   const settings = await getSettings();
-  const key = await getRotatedKey(settings.cloudflare_api_keys);
+  const key = await getRotatedKey(settings.cloudflare_configs);
   if (!key) throw new Error('No Cloudflare API keys configured');
 
   const res = await axios.post(
-    `https://api.cloudflare.com/client/v4/accounts/${settings.cloudflare_account_id}/ai/run/@cf/meta/llama-3-8b-instruct`,
+    `https://api.cloudflare.com/client/v4/accounts/${settings.cloudflare_configs[0]?.account_id}/ai/run/@cf/meta/llama-3-8b-instruct`,
     {
       messages: [
         { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
@@ -54,11 +67,11 @@ async function generateText(prompt: string, niche: string) {
 
 async function generateImage(prompt: string) {
   const settings = await getSettings();
-  const key = await getRotatedKey(settings.cloudflare_api_keys);
+  const key = await getRotatedKey(settings.cloudflare_configs);
   if (!key) throw new Error('No Cloudflare API keys configured');
 
   const res = await axios.post(
-    `https://api.cloudflare.com/client/v4/accounts/${settings.cloudflare_account_id}/ai/run/@cf/bytedance/stable-diffusion-xl-lightning`,
+    `https://api.cloudflare.com/client/v4/accounts/${settings.cloudflare_configs[0]?.account_id}/ai/run/@cf/bytedance/stable-diffusion-xl-lightning`,
     { prompt },
     { headers: { Authorization: `Bearer ${key}` }, responseType: 'arraybuffer' }
   );
@@ -83,9 +96,9 @@ async function generateVoiceover(text: string) {
 async function publishToBlogger(blogId: string, title: string, content: string) {
   const settings = await getSettings();
   const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
-    client_id: settings.blogger_client_id,
-    client_secret: settings.blogger_client_secret,
-    refresh_token: settings.blogger_refresh_token,
+    client_id: decryptSecret(settings.blogger_client_id),
+    client_secret: decryptSecret(settings.blogger_client_secret),
+    refresh_token: decryptSecret(settings.blogger_refresh_token),
     grant_type: 'refresh_token'
   });
   const accessToken = tokenRes.data.access_token;
@@ -225,4 +238,3 @@ export async function runVideoAutomation(scheduleId: string) {
     created_at: new Date().toISOString()
   });
 }
-
