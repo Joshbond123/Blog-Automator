@@ -232,8 +232,10 @@ async function startServer() {
   app.get("/api/blogger/available-accounts", async (req, res) => {
     try {
       const supabase = getSupabase();
+
       const { data: settingsRows } = await supabase.from("settings").select("*").limit(1);
       const settings = normalizeSettings((settingsRows && settingsRows[0]) || {});
+
 
       if (!settings.blogger_client_id || !settings.blogger_client_secret || !settings.blogger_refresh_token) {
         return res.status(400).json({ error: "Blogger OAuth credentials are not configured" });

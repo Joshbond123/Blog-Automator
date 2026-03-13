@@ -1131,6 +1131,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   {(settings.blogger_client_id || settings.blogger_client_secret || settings.blogger_refresh_token) && (
                     <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
                       <p className="text-zinc-400 text-sm">Saved Blogger OAuth credentials.</p>
+
                       <div className="flex items-center gap-3">
                       <button
                         onClick={() => saveSection('blogger-oauth', {
@@ -1142,6 +1143,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       >
                         Edit
                       </button>
+
                       <button
                         onClick={() => {
                           deleteSettingField('blogger_client_id');
@@ -1152,7 +1154,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       >
                         Delete
                       </button>
+
                       </div>
+
                     </div>
                   )}
                 </div>
@@ -1194,7 +1198,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   {settings.github_pat && (
                     <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
                       <p className="text-zinc-400 text-sm">Saved PAT: <span className="text-white font-mono">{settings.github_pat.slice(0, 6)}...{settings.github_pat.slice(-4)}</span></p>
+
                       <div className="flex items-center gap-3"><button onClick={() => saveSection('github', { github_pat: settings.github_pat })} className="text-indigo-400 hover:text-indigo-300 text-sm font-bold">Edit</button><button onClick={() => deleteSettingField('github_pat')} className="text-rose-400 hover:text-rose-300 text-sm font-bold">Delete</button></div>
+
                     </div>
                   )}
                 </div>
@@ -1589,7 +1595,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                         <p className="text-white font-mono text-xs">{settings.catbox_hash}</p>
                       </div>
                       <div className="flex gap-2">
+
                         <button onClick={() => saveSection('catbox', { catbox_hash: settings.catbox_hash })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+
                         <button onClick={() => deleteSettingField('catbox_hash')} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
                       </div>
                     </div>
@@ -1675,7 +1683,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       <p className="text-xs text-zinc-500">Placement: <span className="text-white">{settings.ads_placement || 'after'}</span></p>
                       <div className="flex gap-2">
                         <button onClick={() => saveSection('ads', { ads_html: settings.ads_html, ads_scripts: settings.ads_scripts, ads_placement: settings.ads_placement })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+
                         <button onClick={() => { deleteSettingField('ads_html'); deleteSettingField('ads_scripts'); deleteSettingField('ads_placement'); }} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+
                       </div>
                     </div>
                   )}

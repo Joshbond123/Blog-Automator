@@ -64,6 +64,7 @@ async function getSettings() {
 
 async function saveSettingsPatch(patch: Record<string, any>) {
   const supabase = getSupabase();
+
   const { data: rows } = await supabase.from('settings').select('*').limit(1);
   const row = rows?.[0];
   if (row) {
@@ -74,6 +75,7 @@ async function saveSettingsPatch(patch: Record<string, any>) {
   }
 
   await supabase.from('settings').insert(patch);
+
 }
 
 function getEntryKey(entry: any) {
