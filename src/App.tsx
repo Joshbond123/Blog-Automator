@@ -781,16 +781,20 @@ const Settings = () => {
 
   const fetchData = async () => {
     try {
-      const [setRes, fbRes] = await Promise.all([
+      const [setRes, fbRes, statusRes] = await Promise.all([
         fetch('/api/settings').then(r => r.ok ? r.json() : {} as any),
-        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : [])
+        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : []),
+        fetch('/api/supabase/status').then(r => r.ok ? r.json() : null)
       ]);
       setSettings(setRes);
       setFbPages(fbRes);
-      
-      // Auto-verify Supabase if credentials exist
-      if (setRes && (setRes as any).supabase_url && (setRes as any).supabase_service_role_key) {
-        verifySupabase((setRes as any).supabase_url, (setRes as any).supabase_service_role_key);
+
+      if (statusRes?.connected) {
+        setSupabaseStatus('connected');
+      } else if (statusRes?.configured) {
+        setSupabaseStatus('error');
+      } else {
+        setSupabaseStatus('idle');
       }
     } catch (err) {
       console.error(err);
@@ -843,13 +847,14 @@ const Settings = () => {
       
       // If we just saved Supabase settings, re-verify status
       if (section === 'supabase') {
+        const hasManualCredentials = Boolean(data.supabase_url && data.supabase_service_role_key);
         const verifyRes = await fetch('/api/settings/verify-supabase', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          body: JSON.stringify(hasManualCredentials ? {
             url: data.supabase_url,
             service_role_key: data.supabase_service_role_key
-          })
+          } : {})
         });
         if (verifyRes.ok) setSupabaseStatus('connected');
         else setSupabaseStatus('error');

@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import cron from "node-cron";
-import { getSupabase, updateSupabaseConfig, getPublicConfig } from "./supabase-backend";
+import { getSupabase, updateSupabaseConfig, getPublicConfig, getCurrentSupabaseConfig, verifyCurrentSupabaseConnection } from "./supabase-backend";
 import { runBlogAutomation, runVideoAutomation } from "./automation";
 import { decryptSecret, encryptSecret } from "./secrets";
 
@@ -70,6 +70,17 @@ async function startServer() {
     res.json(getPublicConfig());
   });
 
+  app.get("/api/supabase/status", async (req, res) => {
+    const status = await verifyCurrentSupabaseConnection();
+    const cfg = getCurrentSupabaseConfig();
+    res.json({
+      ...status,
+      url: cfg.url,
+      has_access_token: Boolean(cfg.anonKey),
+      has_service_role_key: Boolean(cfg.serviceRoleKey),
+    });
+  });
+
   // Settings Management
   // Settings
   app.get("/api/settings", async (req, res) => {
@@ -78,16 +89,22 @@ async function startServer() {
       const { data, error } = await supabase.from("settings").select("*").single();
       if (error && error.code !== "PGRST116") return res.status(500).json({ error: error.message });
       
-      res.json(normalizeSettings(data || {}));
+      const normalized = normalizeSettings(data || {});
+      const cfg = getCurrentSupabaseConfig();
+      if (!normalized.supabase_url && cfg.url) normalized.supabase_url = cfg.url;
+      if (!normalized.supabase_access_token && cfg.anonKey) normalized.supabase_access_token = cfg.anonKey;
+      normalized.supabase_service_role_key = normalized.supabase_service_role_key || "";
+      res.json(normalized);
     } catch (err: any) {
       // If not configured, return empty settings so user can configure
+      const cfg = getCurrentSupabaseConfig();
       res.json({
         cloudflare_configs: [],
         elevenlabs_keys: [],
         lightning_keys: [],
-        supabase_url: process.env.SUPABASE_URL || "",
-        supabase_service_role_key: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
-        supabase_access_token: process.env.VITE_SUPABASE_ANON_KEY || ""
+        supabase_url: cfg.url || "",
+        supabase_service_role_key: "",
+        supabase_access_token: cfg.anonKey || ""
       });
     }
   });
@@ -124,11 +141,19 @@ async function startServer() {
   });
 
   app.post("/api/settings/verify-supabase", async (req, res) => {
-    const { url, service_role_key } = req.body;
+    const { url, service_role_key } = req.body || {};
     try {
-      const tempClient = createClient(url, service_role_key);
-      const { error } = await tempClient.from("settings").select("id").limit(1);
-      if (error) throw error;
+      if (url && service_role_key) {
+        const tempClient = createClient(url, service_role_key);
+        const { error } = await tempClient.from("settings").select("id").limit(1);
+        if (error) throw error;
+        return res.json({ status: "connected" });
+      }
+
+      const status = await verifyCurrentSupabaseConnection();
+      if (!status.connected) {
+        return res.status(400).json({ error: "Supabase is not connected" });
+      }
       res.json({ status: "connected" });
     } catch (err: any) {
       res.status(400).json({ error: err.message });
