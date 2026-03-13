@@ -64,7 +64,18 @@ async function getSettings() {
 
 async function saveSettingsPatch(patch: Record<string, any>) {
   const supabase = getSupabase();
-  await supabase.from('settings').upsert({ id: 1, ...patch });
+
+  const { data: rows } = await supabase.from('settings').select('*').limit(1);
+  const row = rows?.[0];
+  if (row) {
+    const selectorColumn = row.setting_key ? 'setting_key' : 'id';
+    const selectorValue = row.setting_key || row.id;
+    await supabase.from('settings').update(patch).eq(selectorColumn, selectorValue);
+    return;
+  }
+
+  await supabase.from('settings').insert(patch);
+
 }
 
 function getEntryKey(entry: any) {
