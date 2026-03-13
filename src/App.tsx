@@ -1134,6 +1134,12 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
 
                       <div className="flex items-center gap-3">
                       <button
+                        onClick={async () => { const res = await fetch('/api/blogger/available-accounts'); if (!res.ok) { const payload = await res.json().catch(() => ({})); alert(payload.error || 'Unable to fetch Blogger accounts'); return; } const blogs = await res.json(); alert(`Fetched ${Array.isArray(blogs) ? blogs.length : 0} Blogger account(s). Open Blogger Accounts page to connect them.`); }}
+                        className="text-emerald-400 hover:text-emerald-300 text-sm font-bold"
+                      >
+                        Fetch Blogger Accounts
+                      </button>
+                      <button
                         onClick={() => saveSection('blogger-oauth', {
                           blogger_client_id: settings.blogger_client_id,
                           blogger_client_secret: settings.blogger_client_secret,
@@ -1347,6 +1353,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                               </div>
                               <div>
                                 <p className="text-white font-bold">{page.name}</p>
+                              <p className="text-[11px] text-zinc-500 font-mono">Page ID: {page.page_id || page.id}</p>
                                 <p className="text-xs text-zinc-500">{page.category}</p>
                               </div>
                             </div>
@@ -1374,6 +1381,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                             </div>
                             <div>
                               <p className="text-white font-bold">{page.name}</p>
+                              <p className="text-[11px] text-zinc-500 font-mono">Page ID: {page.page_id || page.id}</p>
                               <div className="flex items-center gap-2 mt-1">
                                 <div className={cn("w-1.5 h-1.5 rounded-full", page.status === 'valid' ? "bg-emerald-500" : "bg-rose-500")} />
                                 <span className={cn(
@@ -1460,15 +1468,27 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                               </div>
                             </div>
                           </div>
-                          <button 
-                            onClick={() => {
-                              const newKeys = settings.elevenlabs_keys.filter((_: any, i: number) => i !== idx);
-                              saveSection('elevenlabs', { elevenlabs_keys: newKeys });
-                            }}
-                            className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
-                          >
-                            <Trash2 className="w-5 h-5" />
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                const key = prompt('ElevenLabs API Key', item.key || '') || item.key;
+                                const newKeys = settings.elevenlabs_keys.map((k: any, i: number) => i === idx ? { ...k, key } : k);
+                                saveSection('elevenlabs', { elevenlabs_keys: newKeys });
+                              }}
+                              className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
+                            >
+                              <Save className="w-5 h-5" />
+                            </button>
+                            <button 
+                              onClick={() => {
+                                const newKeys = settings.elevenlabs_keys.filter((_: any, i: number) => i !== idx);
+                                saveSection('elevenlabs', { elevenlabs_keys: newKeys });
+                              }}
+                              className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
+                            >
+                              <Trash2 className="w-5 h-5" />
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1534,15 +1554,27 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                               </div>
                             </div>
                           </div>
-                          <button 
-                            onClick={() => {
-                              const newKeys = settings.lightning_keys.filter((_: any, i: number) => i !== idx);
-                              saveSection('lightning', { lightning_keys: newKeys });
-                            }}
-                            className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
-                          >
-                            <Trash2 className="w-5 h-5" />
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                const key = prompt('Lightning.ai API Key', item.key || '') || item.key;
+                                const newKeys = settings.lightning_keys.map((k: any, i: number) => i === idx ? { ...k, key } : k);
+                                saveSection('lightning', { lightning_keys: newKeys });
+                              }}
+                              className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
+                            >
+                              <Save className="w-5 h-5" />
+                            </button>
+                            <button 
+                              onClick={() => {
+                                const newKeys = settings.lightning_keys.filter((_: any, i: number) => i !== idx);
+                                saveSection('lightning', { lightning_keys: newKeys });
+                              }}
+                              className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
+                            >
+                              <Trash2 className="w-5 h-5" />
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
