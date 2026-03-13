@@ -3,11 +3,11 @@ import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import dotenv from "dotenv";
-import { createClient } from "@supabase/supabase-js";
 import cron from "node-cron";
-import { getSupabase, updateSupabaseConfig, getPublicConfig, getCurrentSupabaseConfig, verifyCurrentSupabaseConnection } from "./supabase-backend";
+import { createVerifiedSupabaseClient, getSupabase, updateSupabaseConfig, getPublicConfig, getCurrentSupabaseConfig, verifyCurrentSupabaseConnection } from "./supabase-backend";
 import { runBlogAutomation, runVideoAutomation } from "./automation";
 import { decryptSecret, encryptSecret } from "./secrets";
+import axios from "axios";
 
 dotenv.config();
 
@@ -46,10 +46,23 @@ async function startServer() {
     const currentPayload = { ...payload };
 
     while (true) {
-      const { data, error } = await supabase.from("settings").upsert({ id: 1, ...currentPayload }).select().single();
-      if (!error) return { data, skippedFields: [] as string[] };
+      const { data: existingRows } = await supabase.from("settings").select("*").limit(1);
+      const existingRow = existingRows?.[0];
+      const mutation = existingRow
+        ? supabase
+            .from("settings")
+            .update(currentPayload)
+            .eq(existingRow.setting_key ? "setting_key" : "id", existingRow.setting_key || existingRow.id)
+            .select("*")
+            .limit(1)
+        : supabase.from("settings").insert(currentPayload).select("*").limit(1);
 
-      const missingColumn = error.message?.match(/Could not find the '([^']+)' column/)?.[1];
+      const { data, error } = await mutation;
+      if (!error) return { data: data?.[0] || null, skippedFields: [] as string[] };
+
+      const missingColumn =
+        error.message?.match(/Could not find the ['`’]([^'`’]+)['`’] column/)?.[1]
+        || error.message?.match(/column\s+['`’]([^'`’]+)['`’]/)?.[1];
       if (!missingColumn || !(missingColumn in currentPayload)) {
         return { data: null, error, skippedFields: [] as string[] } as any;
       }
@@ -86,10 +99,10 @@ async function startServer() {
   app.get("/api/settings", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const { data, error } = await supabase.from("settings").select("*").single();
-      if (error && error.code !== "PGRST116") return res.status(500).json({ error: error.message });
-      
-      const normalized = normalizeSettings(data || {});
+      const { data, error } = await supabase.from("settings").select("*").limit(1);
+      if (error) return res.status(500).json({ error: error.message });
+
+      const normalized = normalizeSettings((data && data[0]) || {});
       const cfg = getCurrentSupabaseConfig();
       if (!normalized.supabase_url && cfg.url) normalized.supabase_url = cfg.url;
       if (!normalized.supabase_access_token && cfg.anonKey) normalized.supabase_access_token = cfg.anonKey;
@@ -140,11 +153,30 @@ async function startServer() {
     }
   });
 
+  app.delete("/api/settings/field/:field", async (req, res) => {
+    const allowedFields = new Set([
+      "github_pat", "catbox_hash", "ads_html", "ads_scripts", "ads_placement",
+      "blogger_client_id", "blogger_client_secret", "blogger_refresh_token"
+    ]);
+    const field = req.params.field;
+    if (!allowedFields.has(field)) return res.status(400).json({ error: "Field not allowed" });
+
+    try {
+      const supabase = getSupabase();
+      const resetValue = field === "ads_placement" ? "after" : null;
+      const { data, error } = await upsertSettingsWithFallback(supabase, { [field]: resetValue });
+      if (error) return res.status(500).json({ error: error.message });
+      res.json(normalizeSettings(data));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post("/api/settings/verify-supabase", async (req, res) => {
     const { url, service_role_key } = req.body || {};
     try {
       if (url && service_role_key) {
-        const tempClient = createClient(url, service_role_key);
+        const tempClient = createVerifiedSupabaseClient(url, service_role_key);
         const { error } = await tempClient.from("settings").select("id").limit(1);
         if (error) throw error;
         return res.json({ status: "connected" });
@@ -194,6 +226,40 @@ async function startServer() {
       res.json({ pages });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get("/api/blogger/available-accounts", async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const { data: settingsRow } = await supabase.from("settings").select("*").single();
+      const settings = normalizeSettings(settingsRow || {});
+
+      if (!settings.blogger_client_id || !settings.blogger_client_secret || !settings.blogger_refresh_token) {
+        return res.status(400).json({ error: "Blogger OAuth credentials are not configured" });
+      }
+
+      const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
+        client_id: settings.blogger_client_id,
+        client_secret: settings.blogger_client_secret,
+        refresh_token: settings.blogger_refresh_token,
+        grant_type: "refresh_token",
+      });
+
+      const accessToken = tokenRes.data.access_token;
+      const blogsRes = await axios.get("https://www.googleapis.com/blogger/v3/users/self/blogs", {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+
+      const blogs = (blogsRes.data.items || []).map((item: any) => ({
+        blogger_id: item.id,
+        name: item.name,
+        url: item.url,
+      }));
+
+      res.json(blogs);
+    } catch (err: any) {
+      res.status(500).json({ error: err.response?.data?.error_description || err.response?.data?.error?.message || err.message });
     }
   });
 
@@ -260,6 +326,17 @@ async function startServer() {
       const { data, error } = await supabase.from("blogger_accounts").update(req.body).eq("id", req.params.id).select().single();
       if (error) return res.status(500).json({ error: error.message });
       res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.delete("/api/blogger-accounts/:id", async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const { error } = await supabase.from("blogger_accounts").delete().eq("id", req.params.id);
+      if (error) return res.status(500).json({ error: error.message });
+      res.sendStatus(204);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }

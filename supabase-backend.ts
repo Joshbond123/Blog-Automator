@@ -12,11 +12,35 @@ export interface SupabaseConfig {
   anonKey?: string;
 }
 
-const envConfig: SupabaseConfig = {
-  url: process.env.SUPABASE_URL || "",
-  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
-  anonKey: process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ACCESS_TOKEN || "",
-};
+function normalizeTextInput(value?: string) {
+  return typeof value === "string" ? value.normalize("NFKC").trim() : "";
+}
+
+function assertByteString(name: string, value: string) {
+  for (let i = 0; i < value.length; i += 1) {
+    if (value.charCodeAt(i) > 255) {
+      throw new Error(`${name} contains unsupported characters. Please paste the original key/url without smart quotes or special symbols.`);
+    }
+  }
+}
+
+function sanitizeSupabaseConfig(config: Partial<SupabaseConfig>) {
+  const url = normalizeTextInput(config.url);
+  const serviceRoleKey = normalizeTextInput(config.serviceRoleKey);
+  const anonKey = typeof config.anonKey === "string" ? normalizeTextInput(config.anonKey) : config.anonKey;
+
+  if (url) assertByteString("SUPABASE_URL", url);
+  if (serviceRoleKey) assertByteString("SUPABASE_SERVICE_ROLE_KEY", serviceRoleKey);
+  if (anonKey) assertByteString("SUPABASE_ACCESS_TOKEN", anonKey);
+
+  return { url, serviceRoleKey, anonKey };
+}
+
+const envConfig: SupabaseConfig = sanitizeSupabaseConfig({
+  url: process.env.SUPABASE_URL,
+  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  anonKey: process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ACCESS_TOKEN,
+}) as SupabaseConfig;
 
 let currentConfig: SupabaseConfig = { ...envConfig };
 let configSource: "environment" | "manual" = "environment";
@@ -54,14 +78,24 @@ export function getSupabase() {
 }
 
 export function updateSupabaseConfig(config: Partial<SupabaseConfig>) {
+  const sanitized = sanitizeSupabaseConfig(config);
   const next = { ...currentConfig };
-  if (config.url) next.url = config.url;
-  if (config.serviceRoleKey) next.serviceRoleKey = config.serviceRoleKey;
-  if (typeof config.anonKey === "string") next.anonKey = config.anonKey;
+  if (sanitized.url) next.url = sanitized.url;
+  if (sanitized.serviceRoleKey) next.serviceRoleKey = sanitized.serviceRoleKey;
+  if (typeof sanitized.anonKey === "string") next.anonKey = sanitized.anonKey;
   currentConfig = next;
   configSource = "manual";
   supabaseInstance = null;
   return getSupabase();
+}
+
+export function createVerifiedSupabaseClient(url: string, serviceRoleKey: string) {
+  const sanitized = sanitizeSupabaseConfig({ url, serviceRoleKey });
+  return createClient(sanitized.url, sanitized.serviceRoleKey, {
+    global: {
+      fetch: stableFetch as any,
+    },
+  });
 }
 
 export async function verifyCurrentSupabaseConnection() {

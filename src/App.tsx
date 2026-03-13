@@ -288,12 +288,12 @@ const Dashboard = () => {
 
 const BloggerAccounts = () => {
   const [accounts, setAccounts] = useState<BloggerAccount[]>([]);
+  const [availableAccounts, setAvailableAccounts] = useState<Array<{ blogger_id: string; name: string; url: string }>>([]);
   const [facebookPages, setFacebookPages] = useState<FacebookPage[]>([]);
-  const [showAddModal, setShowAddModal] = useState(false);
   const [showConnectFbModal, setShowConnectFbModal] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
-  const [newAccount, setNewAccount] = useState({ blogger_id: '', niche: NICHES[0] });
+  const [connectTarget, setConnectTarget] = useState<{ blogger_id: string; name: string; url: string } | null>(null);
+  const [selectedNiche, setSelectedNiche] = useState<Niche>(NICHES[0]);
 
   useEffect(() => {
     fetchData();
@@ -301,36 +301,53 @@ const BloggerAccounts = () => {
 
   const fetchData = async () => {
     try {
-      const [accRes, fbRes] = await Promise.all([
+      const [accRes, fbRes, availableRes] = await Promise.all([
         fetch('/api/blogger-accounts').then(r => r.ok ? r.json() : []),
-        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : [])
+        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : []),
+        fetch('/api/blogger/available-accounts').then(async r => r.ok ? r.json() : [])
       ]);
       setAccounts(accRes);
       setFacebookPages(fbRes);
+      setAvailableAccounts(availableRes);
     } catch (err) {
       console.error(err);
+      setAvailableAccounts([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleAddAccount = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const connectedByBloggerId = new Set(accounts.map(a => a.blogger_id));
+
+  const handleConnectAccount = async () => {
+    if (!connectTarget) return;
+
     try {
       const res = await fetch('/api/blogger-accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...newAccount,
-          name: `Blog ${newAccount.blogger_id.slice(0, 4)}`, // Mock name for now, real logic would fetch from API
-          url: `https://${newAccount.blogger_id}.blogspot.com`,
+          blogger_id: connectTarget.blogger_id,
+          name: connectTarget.name,
+          url: connectTarget.url,
+          niche: selectedNiche,
           status: 'connected'
         })
       });
       if (res.ok) {
-        setShowAddModal(false);
-        fetchData();
+        setConnectTarget(null);
+        await fetchData();
       }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDisconnect = async (account: BloggerAccount) => {
+    if (!confirm(`Disconnect ${account.name}?`)) return;
+    try {
+      await fetch(`/api/blogger-accounts/${account.id}`, { method: 'DELETE' });
+      await fetchData();
     } catch (err) {
       console.error(err);
     }
@@ -338,7 +355,6 @@ const BloggerAccounts = () => {
 
   const handleConnectFb = async (bloggerAccountId: string, facebookPageId: string) => {
     try {
-      // Real update logic
       const res = await fetch(`/api/blogger-accounts/${bloggerAccountId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -357,182 +373,111 @@ const BloggerAccounts = () => {
 
   return (
     <div className="flex-1 p-8 space-y-8">
-      <header className="flex items-center justify-between">
-        <div>
-          <h2 className="text-3xl font-bold text-white tracking-tight">Blogger Accounts</h2>
-          <p className="text-zinc-400 mt-1">Manage your connected blogs and link them to Facebook pages.</p>
-        </div>
-        <button 
-          onClick={() => setShowAddModal(true)}
-          className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold flex items-center gap-2 hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20"
-        >
-          <Plus className="w-5 h-5" /> Add Blogger Account
-        </button>
+      <header>
+        <h2 className="text-3xl font-bold text-white tracking-tight">Blogger Accounts</h2>
+        <p className="text-zinc-400 mt-1">Manage your connected blogs and link them to Facebook pages.</p>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
+        <h3 className="text-xl font-bold text-white">Available Blogger Accounts</h3>
+        {availableAccounts.length === 0 && (
+          <p className="text-zinc-500">No Blogger accounts found. Save valid Blogger OAuth credentials in Settings, then refresh.</p>
+        )}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {availableAccounts.map((blog) => {
+            const connected = connectedByBloggerId.has(blog.blogger_id);
+            return (
+              <div key={blog.blogger_id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-white font-bold">{blog.name}</p>
+                  <p className="text-zinc-500 text-xs font-mono">{blog.blogger_id}</p>
+                </div>
+                <button
+                  onClick={() => {
+                    if (!connected) {
+                      setSelectedNiche(NICHES[0]);
+                      setConnectTarget(blog);
+                    }
+                  }}
+                  disabled={connected}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-sm font-bold",
+                    connected ? "bg-emerald-500/10 text-emerald-500 cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-500"
+                  )}
+                >
+                  {connected ? 'Connected' : 'Connect'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {accounts.map((acc) => (
-          <motion.div 
+          <motion.div
             layout
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            key={acc.id} 
+            key={acc.id}
             className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-xl flex flex-col"
           >
             <div className="flex items-center justify-between mb-4">
               <div className="w-12 h-12 bg-orange-500/10 rounded-2xl flex items-center justify-center">
                 <Globe className="text-orange-500 w-6 h-6" />
               </div>
-              <span className={cn(
-                "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider",
-                acc.status === 'connected' ? "bg-emerald-500/10 text-emerald-500" : "bg-rose-500/10 text-rose-500"
-              )}>
-                {acc.status}
-              </span>
+              <span className={cn("px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider", acc.status === 'connected' ? "bg-emerald-500/10 text-emerald-500" : "bg-rose-500/10 text-rose-500")}>{acc.status}</span>
             </div>
             <h3 className="text-xl font-bold text-white">{acc.name}</h3>
             <p className="text-zinc-500 text-sm font-mono mt-1">ID: {acc.blogger_id}</p>
-            <div className="mt-4 space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-zinc-400">Niche:</span>
-                <span className="text-indigo-400 font-medium">{acc.niche}</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-zinc-400">URL:</span>
-                <a href={acc.url} target="_blank" rel="noreferrer" className="text-zinc-300 hover:text-white flex items-center gap-1">
-                  Visit <ExternalLink className="w-3 h-3" />
-                </a>
-              </div>
-            </div>
-            
+            <p className="text-indigo-400 text-sm mt-2">{acc.niche}</p>
+
             <div className="mt-6 pt-6 border-t border-zinc-800 flex flex-col gap-3">
-              {acc.facebook_page_id ? (
-                <div className="flex items-center justify-between bg-zinc-950 p-3 rounded-2xl border border-zinc-800">
-                  <div className="flex items-center gap-2">
-                    <Facebook className="w-4 h-4 text-blue-500" />
-                    <span className="text-sm text-zinc-300 font-medium">
-                      {facebookPages.find(p => p.id === acc.facebook_page_id)?.name || 'Connected Page'}
-                    </span>
-                  </div>
-                  <button className="text-zinc-500 hover:text-rose-500 transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ) : (
-                <button 
-                  onClick={() => setShowConnectFbModal(acc.id)}
-                  className="w-full py-3 rounded-2xl bg-zinc-800 text-zinc-300 font-bold text-sm hover:bg-zinc-700 transition-colors flex items-center justify-center gap-2"
-                >
-                  <Facebook className="w-4 h-4" /> Connect Facebook Page
-                </button>
-              )}
+              <button onClick={() => setShowConnectFbModal(acc.id)} className="w-full py-3 rounded-2xl bg-zinc-800 text-zinc-300 font-bold text-sm hover:bg-zinc-700 transition-colors flex items-center justify-center gap-2">
+                <Facebook className="w-4 h-4" /> Connect Facebook Page
+              </button>
+              <button onClick={() => handleDisconnect(acc)} className="w-full py-3 rounded-2xl bg-rose-500/10 text-rose-400 font-bold text-sm hover:bg-rose-500/20 transition-colors">
+                Disconnect Blogger Account
+              </button>
             </div>
           </motion.div>
         ))}
-      </div>
+      </section>
 
-      {/* Add Account Modal */}
       <AnimatePresence>
-        {showAddModal && (
+        {connectTarget && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowAddModal(false)}
-              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden"
-            >
-              <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
-                <h3 className="text-xl font-bold text-white">Add Blogger Account</h3>
-                <button onClick={() => setShowAddModal(false)} className="text-zinc-500 hover:text-white">
-                  <X className="w-6 h-6" />
-                </button>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setConnectTarget(null)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden p-6 space-y-6">
+              <h3 className="text-xl font-bold text-white">Connect {connectTarget.name}</h3>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-zinc-400">Select Niche</label>
+                <select value={selectedNiche} onChange={(e) => setSelectedNiche(e.target.value as Niche)} className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white">
+                  {NICHES.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
               </div>
-              <form onSubmit={handleAddAccount} className="p-6 space-y-6">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-zinc-400">Blogger Blog ID</label>
-                  <input 
-                    required
-                    type="text" 
-                    value={newAccount.blogger_id}
-                    onChange={(e) => setNewAccount({ ...newAccount, blogger_id: e.target.value })}
-                    placeholder="e.g. 1234567890"
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-colors"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-zinc-400">Select Niche</label>
-                  <select 
-                    value={newAccount.niche}
-                    onChange={(e) => setNewAccount({ ...newAccount, niche: e.target.value as Niche })}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-colors appearance-none"
-                  >
-                    {NICHES.map(n => <option key={n} value={n}>{n}</option>)}
-                  </select>
-                </div>
-                <button 
-                  type="submit"
-                  className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20"
-                >
-                  Add Blogger Account
-                </button>
-              </form>
+              <button onClick={handleConnectAccount} className="w-full bg-indigo-600 text-white py-3 rounded-2xl font-bold hover:bg-indigo-500">Connect Account</button>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
 
-      {/* Connect FB Modal */}
       <AnimatePresence>
         {showConnectFbModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowConnectFbModal(null)}
-              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden"
-            >
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowConnectFbModal(null)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden">
               <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
                 <h3 className="text-xl font-bold text-white">Connect Facebook Page</h3>
-                <button onClick={() => setShowConnectFbModal(null)} className="text-zinc-500 hover:text-white">
-                  <X className="w-6 h-6" />
-                </button>
+                <button onClick={() => setShowConnectFbModal(null)} className="text-zinc-500 hover:text-white"><X className="w-6 h-6" /></button>
               </div>
               <div className="p-6 space-y-4">
-                {facebookPages.length === 0 ? (
-                  <div className="text-center py-8">
-                    <p className="text-zinc-500 italic">No Facebook pages found. Add them in Settings.</p>
-                  </div>
-                ) : (
-                  facebookPages.map(page => (
-                    <button
-                      key={page.id}
-                      onClick={() => handleConnectFb(showConnectFbModal, page.id)}
-                      className="w-full flex items-center justify-between p-4 bg-zinc-950 border border-zinc-800 rounded-2xl hover:border-indigo-500 transition-all group"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-blue-500/10 rounded-xl flex items-center justify-center">
-                          <Facebook className="text-blue-500 w-5 h-5" />
-                        </div>
-                        <span className="text-white font-medium">{page.name}</span>
-                      </div>
-                      <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-indigo-400 transition-colors" />
-                    </button>
-                  ))
-                )}
+                {facebookPages.length === 0 ? <p className="text-zinc-500">No Facebook pages found.</p> : facebookPages.map(page => (
+                  <button key={page.id} onClick={() => handleConnectFb(showConnectFbModal, page.id)} className="w-full flex items-center justify-between p-4 bg-zinc-950 border border-zinc-800 rounded-2xl hover:border-indigo-500 transition-all group">
+                    <span className="text-white font-medium">{page.name}</span>
+                    <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-indigo-400" />
+                  </button>
+                ))}
               </div>
             </motion.div>
           </div>
@@ -868,6 +813,18 @@ const Settings = () => {
     }
   };
 
+  const deleteSettingField = async (field: string) => {
+    try {
+      const res = await fetch(`/api/settings/field/${field}`, { method: 'DELETE' });
+      if (res.ok) {
+        const updated = await res.json();
+        setSettings(updated);
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const handleFetchFbPages = async () => {
     if (!fbToken) return;
     setFetchingFb(true);
@@ -1170,6 +1127,22 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     {saving === 'blogger-oauth' ? <RefreshCw className="w-6 h-6 animate-spin" /> : <Save className="w-6 h-6" />}
                     Save Blogger OAuth Credentials
                   </button>
+
+                  {(settings.blogger_client_id || settings.blogger_client_secret || settings.blogger_refresh_token) && (
+                    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
+                      <p className="text-zinc-400 text-sm">Saved Blogger OAuth credentials.</p>
+                      <button
+                        onClick={() => {
+                          deleteSettingField('blogger_client_id');
+                          deleteSettingField('blogger_client_secret');
+                          deleteSettingField('blogger_refresh_token');
+                        }}
+                        className="text-rose-400 hover:text-rose-300 text-sm font-bold"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1205,6 +1178,13 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     {saving === 'github' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                     Save Token
                   </button>
+
+                  {settings.github_pat && (
+                    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
+                      <p className="text-zinc-400 text-sm">Saved PAT: <span className="text-white font-mono">{settings.github_pat.slice(0, 6)}...{settings.github_pat.slice(-4)}</span></p>
+                      <button onClick={() => deleteSettingField('github_pat')} className="text-rose-400 hover:text-rose-300 text-sm font-bold">Delete</button>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1242,7 +1222,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       const accId = (document.getElementById('cf-account-id') as HTMLInputElement).value;
                       const apiKey = (document.getElementById('cf-api-key') as HTMLInputElement).value;
                       if (accId && apiKey) {
-                        const newConfigs = [...(settings.cloudflare_configs || []), { account_id: accId, api_key: apiKey, usage: 0 }];
+                        const newConfigs = [...(settings.cloudflare_configs || []), { account_id: accId, api_key: apiKey, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
                         saveSection('cloudflare', { cloudflare_configs: newConfigs });
                         (document.getElementById('cf-account-id') as HTMLInputElement).value = '';
                         (document.getElementById('cf-api-key') as HTMLInputElement).value = '';
@@ -1266,19 +1246,32 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                             <p className="text-white font-medium font-mono text-sm">{config.account_id}</p>
                             <div className="flex items-center gap-2 mt-1">
                               <BarChart3 className="w-3 h-3 text-zinc-500" />
-                              <span className="text-xs text-zinc-500">Usage: {config.usage || 0} requests</span>
+                              <span className="text-xs text-zinc-500">Success: {config.success_calls || 0} • Failed: {config.failed_calls || 0} • Total: {config.total_calls || 0} • Monthly: {config.monthly_calls || 0}</span>
                             </div>
                           </div>
                         </div>
-                        <button 
-                          onClick={() => {
-                            const newConfigs = settings.cloudflare_configs.filter((_: any, i: number) => i !== idx);
-                            saveSection('cloudflare', { cloudflare_configs: newConfigs });
-                          }}
-                          className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
-                        >
-                          <Trash2 className="w-5 h-5" />
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              const account_id = prompt('Cloudflare Account ID', config.account_id || '') || config.account_id;
+                              const api_key = prompt('Cloudflare API Key', config.api_key || '') || config.api_key;
+                              const newConfigs = settings.cloudflare_configs.map((c: any, i: number) => i === idx ? { ...c, account_id, api_key } : c);
+                              saveSection('cloudflare', { cloudflare_configs: newConfigs });
+                            }}
+                            className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
+                          >
+                            <Save className="w-5 h-5" />
+                          </button>
+                          <button 
+                            onClick={() => {
+                              const newConfigs = settings.cloudflare_configs.filter((_: any, i: number) => i !== idx);
+                              saveSection('cloudflare', { cloudflare_configs: newConfigs });
+                            }}
+                            className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
+                          >
+                            <Trash2 className="w-5 h-5" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                     {(!settings.cloudflare_configs || settings.cloudflare_configs.length === 0) && (
@@ -1414,7 +1407,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                         onClick={() => {
                           const key = (document.getElementById('el-api-key') as HTMLInputElement).value;
                           if (key) {
-                            const newKeys = [...(settings.elevenlabs_keys || []), { key, usage: 0, requests: 0 }];
+                            const newKeys = [...(settings.elevenlabs_keys || []), { key, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
                             saveSection('elevenlabs', { elevenlabs_keys: newKeys });
                             (document.getElementById('el-api-key') as HTMLInputElement).value = '';
                           }
@@ -1440,11 +1433,11 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                               <div className="flex items-center gap-4 mt-1">
                                 <div className="flex items-center gap-1.5">
                                   <BarChart3 className="w-3 h-3 text-zinc-500" />
-                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.requests || 0} Requests</span>
+                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.success_calls || 0} Success</span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                   <Database className="w-3 h-3 text-zinc-500" />
-                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.usage || 0} Chars</span>
+                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.failed_calls || 0} Failed • {item.total_calls || 0} Total • {item.monthly_calls || 0} Monthly</span>
                                 </div>
                               </div>
                             </div>
@@ -1492,7 +1485,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                         onClick={() => {
                           const key = (document.getElementById('li-api-key') as HTMLInputElement).value;
                           if (key) {
-                            const newKeys = [...(settings.lightning_keys || []), { key, usage: 0, requests: 0 }];
+                            const newKeys = [...(settings.lightning_keys || []), { key, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
                             saveSection('lightning', { lightning_keys: newKeys });
                             (document.getElementById('li-api-key') as HTMLInputElement).value = '';
                           }
@@ -1518,7 +1511,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                               <div className="flex items-center gap-4 mt-1">
                                 <div className="flex items-center gap-1.5">
                                   <BarChart3 className="w-3 h-3 text-zinc-500" />
-                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.requests || 0} Renders</span>
+                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.success_calls || 0} Success • {item.failed_calls || 0} Failed • {item.total_calls || 0} Total • {item.monthly_calls || 0} Monthly</span>
                                 </div>
                               </div>
                             </div>
@@ -1576,6 +1569,19 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     {saving === 'catbox' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                     Save Settings
                   </button>
+
+                  {settings.catbox_hash && (
+                    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
+                      <div>
+                        <p className="text-zinc-400 text-sm">Saved Catbox.moe</p>
+                        <p className="text-white font-mono text-xs">{settings.catbox_hash}</p>
+                      </div>
+                      <div className="flex gap-2">
+                        <button className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                        <button onClick={() => deleteSettingField('catbox_hash')} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1650,6 +1656,17 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     {saving === 'ads' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                     Save Ads Settings
                   </button>
+
+                  {(settings.ads_html || settings.ads_scripts) && (
+                    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 space-y-3">
+                      <p className="text-zinc-400 text-sm">Saved Ads Configuration</p>
+                      <p className="text-xs text-zinc-500">Placement: <span className="text-white">{settings.ads_placement || 'after'}</span></p>
+                      <div className="flex gap-2">
+                        <button onClick={() => saveSection('ads', { ads_html: settings.ads_html, ads_scripts: settings.ads_scripts, ads_placement: settings.ads_placement })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                        <button onClick={() => { deleteSettingField('ads_html'); deleteSettingField('ads_scripts'); }} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
