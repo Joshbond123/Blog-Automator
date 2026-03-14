@@ -1,11 +1,10 @@
 import { createClient } from "@supabase/supabase-js";
+import { fetch as undiciFetch, ProxyAgent } from "undici";
+import dns from "node:dns";
 import dotenv from "dotenv";
-import fs from "fs";
-import path from "path";
 
 dotenv.config();
-
-const CONFIG_PATH = path.join(process.cwd(), "supabase-config.json");
+dns.setDefaultResultOrder("ipv4first");
 
 export interface SupabaseConfig {
   url: string;
@@ -13,58 +12,112 @@ export interface SupabaseConfig {
   anonKey?: string;
 }
 
-let currentConfig: SupabaseConfig = {
-  url: process.env.SUPABASE_URL || "",
-  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
-  anonKey: process.env.VITE_SUPABASE_ANON_KEY || "",
-};
+function normalizeTextInput(value?: string) {
+  return typeof value === "string" ? value.normalize("NFKC").trim() : "";
+}
 
-// Try to load from local config if environment is missing
-if (!currentConfig.url && fs.existsSync(CONFIG_PATH)) {
-  try {
-    const savedConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
-    currentConfig = { ...currentConfig, ...savedConfig };
-  } catch (err) {
-    console.error("Failed to load local supabase config:", err);
+function assertByteString(name: string, value: string) {
+  for (let i = 0; i < value.length; i += 1) {
+    if (value.charCodeAt(i) > 255) {
+      throw new Error(`${name} contains unsupported characters. Please paste the original key/url without smart quotes or special symbols.`);
+    }
   }
 }
 
+function sanitizeSupabaseConfig(config: Partial<SupabaseConfig>) {
+  const url = normalizeTextInput(config.url);
+  const serviceRoleKey = normalizeTextInput(config.serviceRoleKey);
+  const anonKey = typeof config.anonKey === "string" ? normalizeTextInput(config.anonKey) : config.anonKey;
+
+  if (url) assertByteString("SUPABASE_URL", url);
+  if (serviceRoleKey) assertByteString("SUPABASE_SERVICE_ROLE_KEY", serviceRoleKey);
+  if (anonKey) assertByteString("SUPABASE_ACCESS_TOKEN", anonKey);
+
+  return { url, serviceRoleKey, anonKey };
+}
+
+const envConfig: SupabaseConfig = sanitizeSupabaseConfig({
+  url: process.env.SUPABASE_URL,
+  serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  anonKey: process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ACCESS_TOKEN,
+}) as SupabaseConfig;
+
+let currentConfig: SupabaseConfig = { ...envConfig };
+let configSource: "environment" | "manual" = "environment";
 let supabaseInstance: any = null;
+
+const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
+const proxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
+
+async function stableFetch(input: any, init?: RequestInit): Promise<any> {
+  return proxyAgent
+    ? undiciFetch(input, { ...(init || {}), dispatcher: proxyAgent } as any)
+    : fetch(input, init);
+}
+
+export function getCurrentSupabaseConfig() {
+  return { ...currentConfig, source: configSource };
+}
+
+export function isSupabaseConfigured() {
+  return Boolean(currentConfig.url && currentConfig.serviceRoleKey);
+}
 
 export function getSupabase() {
   if (supabaseInstance) return supabaseInstance;
-
-  if (currentConfig.url && currentConfig.serviceRoleKey) {
-    try {
-      supabaseInstance = createClient(currentConfig.url, currentConfig.serviceRoleKey);
-      return supabaseInstance;
-    } catch (err) {
-      console.error("Failed to initialize Supabase client:", err);
-      throw new Error("Supabase initialization failed. Please check your credentials.");
-    }
+  if (!isSupabaseConfigured()) {
+    throw new Error("Supabase is not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
   }
 
-  throw new Error("Supabase is not configured. Please set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.");
+  supabaseInstance = createClient(currentConfig.url, currentConfig.serviceRoleKey, {
+    global: {
+      fetch: stableFetch as any,
+    },
+  });
+  return supabaseInstance;
 }
 
 export function updateSupabaseConfig(config: Partial<SupabaseConfig>) {
-  currentConfig = { ...currentConfig, ...config };
-  
-  // Persist to local file for survival across restarts if not in env
-  try {
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(currentConfig, null, 2));
-  } catch (err) {
-    console.error("Failed to save supabase config to file:", err);
-  }
-
-  // Reset instance so it's re-created on next get
+  const sanitized = sanitizeSupabaseConfig(config);
+  const next = { ...currentConfig };
+  if (sanitized.url) next.url = sanitized.url;
+  if (sanitized.serviceRoleKey) next.serviceRoleKey = sanitized.serviceRoleKey;
+  if (typeof sanitized.anonKey === "string") next.anonKey = sanitized.anonKey;
+  currentConfig = next;
+  configSource = "manual";
   supabaseInstance = null;
   return getSupabase();
+}
+
+export function createVerifiedSupabaseClient(url: string, serviceRoleKey: string) {
+  const sanitized = sanitizeSupabaseConfig({ url, serviceRoleKey });
+  return createClient(sanitized.url, sanitized.serviceRoleKey, {
+    global: {
+      fetch: stableFetch as any,
+    },
+  });
+}
+
+export async function verifyCurrentSupabaseConnection() {
+  if (!isSupabaseConfigured()) {
+    return { configured: false, connected: false, source: configSource };
+  }
+
+  try {
+    const client = getSupabase();
+    const { error } = await client.from("settings").select("*").limit(1);
+    if (error) throw error;
+    return { configured: true, connected: true, source: configSource };
+  } catch {
+    return { configured: true, connected: false, source: configSource };
+  }
 }
 
 export function getPublicConfig() {
   return {
     url: currentConfig.url,
-    anonKey: currentConfig.anonKey
+    anonKey: currentConfig.anonKey,
+    source: configSource,
+    configured: isSupabaseConfigured(),
   };
 }
