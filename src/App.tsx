@@ -391,6 +391,7 @@ const BloggerAccounts = () => {
                 <div>
                   <p className="text-white font-bold">{blog.name}</p>
                   <p className="text-zinc-500 text-xs font-mono">{blog.blogger_id}</p>
+                  <a href={blog.url} target="_blank" rel="noreferrer" className="text-indigo-400 text-xs hover:text-indigo-300 break-all">{blog.url}</a>
                 </div>
                 <button
                   onClick={() => {
@@ -430,6 +431,7 @@ const BloggerAccounts = () => {
             </div>
             <h3 className="text-xl font-bold text-white">{acc.name}</h3>
             <p className="text-zinc-500 text-sm font-mono mt-1">ID: {acc.blogger_id}</p>
+            <a href={acc.url} target="_blank" rel="noreferrer" className="text-indigo-400 text-xs mt-2 hover:text-indigo-300 break-all">{acc.url}</a>
             <p className="text-indigo-400 text-sm mt-2">{acc.niche}</p>
 
             <div className="mt-6 pt-6 border-t border-zinc-800 flex flex-col gap-3">
