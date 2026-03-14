@@ -256,6 +256,108 @@ async function generateVoiceover(text: string) {
   }
 }
 
+
+function normalizeTopicText(text: string) {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function jaccardSimilarity(a: string, b: string) {
+  const aa = new Set(normalizeTopicText(a).split(' ').filter(Boolean));
+  const bb = new Set(normalizeTopicText(b).split(' ').filter(Boolean));
+  if (!aa.size || !bb.size) return 0;
+  const intersection = [...aa].filter((x) => bb.has(x)).length;
+  const union = new Set([...aa, ...bb]).size;
+  return union ? intersection / union : 0;
+}
+
+async function fetchTrendingTopicsForNiche(niche: string) {
+  const queries = [
+    niche,
+    `${niche} trends`,
+    `${niche} breaking news`,
+    `${niche} latest`,
+    `${niche} insights`,
+  ];
+
+  const collected: string[] = [];
+  for (const query of queries) {
+    try {
+      const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
+      const res = await axios.get(rssUrl, { timeout: 10000 });
+      const xml = String(res.data || '');
+      const matches = [...xml.matchAll(/<title>([^<]+)<\/title>/g)].map((m) => m[1].replace(/&amp;/g, '&').trim());
+      const topicTitles = matches.slice(1); // skip feed title
+      collected.push(...topicTitles);
+    } catch {
+      // continue with remaining feeds
+    }
+  }
+
+  const deduped: string[] = [];
+  for (const topic of collected) {
+    if (!topic || deduped.some((t) => normalizeTopicText(t) === normalizeTopicText(topic))) continue;
+    deduped.push(topic);
+    if (deduped.length >= 50) break;
+  }
+
+  return deduped;
+}
+
+async function pickUniqueTrendingTopic(supabase: any, niche: string) {
+  const candidates = await fetchTrendingTopicsForNiche(niche);
+  const { data: usedTopics } = await supabase
+    .from('topics')
+    .select('title')
+    .eq('niche', niche)
+    .order('created_at', { ascending: false })
+    .limit(500);
+
+  const used = (usedTopics || []).map((row: any) => row.title).filter(Boolean);
+
+  const chosen = candidates.find((candidate) => {
+    const normalized = normalizeTopicText(candidate);
+    return !used.some((u) => {
+      const nu = normalizeTopicText(u);
+      return nu === normalized || jaccardSimilarity(nu, normalized) >= 0.72;
+    });
+  });
+
+  if (chosen) return chosen;
+
+  const aiFallback = await generateText(
+    `Generate one unique, highly specific, trending topic for niche: ${niche}. Return only topic title. Must be different from common repeated topics.`,
+    niche,
+  );
+  return aiFallback;
+}
+
+async function rewriteToViralTitle(topic: string, niche: string) {
+  return generateText(
+    `Rewrite this topic into one professional, click-worthy, viral title. Keep it faithful and natural. Topic: ${topic}`,
+    niche,
+  );
+}
+
+function buildFacebookTeaser(fullContent: string, niche: string, blogUrl: string) {
+  const plain = fullContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const teaser = plain.slice(0, 280);
+  const hashtagBase = niche
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+    .slice(0, 3)
+    .map((w) => `#${w}`)
+    .join(' ');
+
+  return `${teaser}...
+
+Read the full article in the comments 👇
+${hashtagBase}`;
+}
+
 async function publishToBlogger(blogId: string, title: string, content: string) {
   const settings = await getSettings();
   const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
@@ -291,20 +393,36 @@ export async function runBlogAutomation(scheduleId: string) {
   const niche = account.niche;
 
   try {
-    const topic = await generateText(`Generate a viral blog post title for the ${niche} niche. Return only the title.`, niche);
-    const content = await generateText(`Write a detailed, engaging blog post about "${topic}" for the ${niche} niche. Use HTML formatting.`, niche);
-    const imageBuffer = await generateImage(`A high-quality, professional image related to: ${topic}. Cinematic style.`);
-    const imageUrl = await uploadToCatbox(imageBuffer, 'blog-image.png');
+    const discoveredTopic = await pickUniqueTrendingTopic(supabase, niche);
+    const topic = await rewriteToViralTitle(discoveredTopic, niche);
+    const content = await generateText(
+      `Write a high-quality, engaging, professional blog article about: "${topic}" for niche "${niche}". Keep it topic-specific and non-generic. Return clean HTML.`,
+      niche,
+    );
+
+    const imageBuffer = await generateImage(
+      `Create a realistic, high-impact image about: ${topic}. No text, no letters, no words, no logos, no watermark, no captions in the image.`,
+    );
+
+    const imageUrl = await uploadToCatbox(imageBuffer, `blog-image-${Date.now()}.png`);
     const bloggerPost = await publishToBlogger(account.blogger_id, topic, `<img src="${imageUrl}" style="width:100%" /><br/>${content}`);
+
+    await supabase.from('topics').insert({ niche, title: topic, used: true, created_at: new Date().toISOString() });
 
     if (account.facebook_page_id) {
       const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', account.facebook_page_id).single();
       if (fbPage) {
-        await publishToFacebook(
-          fbPage.page_id,
-          fbPage.access_token,
-          `New ${niche} Post: ${topic}\n\nRead more here: ${bloggerPost.url}`,
-          bloggerPost.url
+        const teaserMessage = buildFacebookTeaser(content, niche, bloggerPost.url);
+        const fbPost = await publishToFacebook(fbPage.page_id, fbPage.access_token, teaserMessage, imageUrl);
+
+        await axios.post(
+          `https://graph.facebook.com/v19.0/${fbPost.id}/comments`,
+          {
+            message: `Full article is live here: ${bloggerPost.url}
+
+If this helped you, share your thoughts and read the full post now 🚀`,
+            access_token: fbPage.access_token,
+          },
         );
       }
     }
@@ -318,7 +436,9 @@ export async function runBlogAutomation(scheduleId: string) {
       url: bloggerPost.url,
       published_at: new Date().toISOString()
     });
-  } catch (error) {
+
+    await supabase.from('schedules').update({ last_execution_status: 'success', last_executed_at: new Date().toISOString() }).eq('id', scheduleId);
+  } catch (error: any) {
     console.error('Blog automation failed:', error);
     await supabase.from('posts').insert({
       title: 'Failed to generate post',
@@ -328,6 +448,7 @@ export async function runBlogAutomation(scheduleId: string) {
       status: 'failed',
       published_at: new Date().toISOString()
     });
+    await supabase.from('schedules').update({ last_execution_status: `failed: ${error?.message || 'unknown'}`, last_executed_at: new Date().toISOString() }).eq('id', scheduleId);
   }
 }
 

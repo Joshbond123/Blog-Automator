@@ -50,6 +50,8 @@ create table if not exists schedules (
   target_id uuid not null,
   posting_time text not null,
   active boolean default true,
+  last_execution_status text,
+  last_executed_at timestamptz,
   created_at timestamptz default now()
 );
 
@@ -90,3 +92,6 @@ alter table settings add column if not exists blogger_refresh_token text;
 alter table settings add column if not exists ads_html text;
 alter table settings add column if not exists ads_scripts text;
 alter table settings add column if not exists ads_placement text default 'after';
+
+alter table schedules add column if not exists last_execution_status text;
+alter table schedules add column if not exists last_executed_at timestamptz;

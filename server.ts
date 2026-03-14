@@ -456,6 +456,25 @@ async function startServer() {
     }
   });
 
+
+  app.patch("/api/schedules/:id", async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const payload = {
+        posting_time: req.body?.posting_time,
+        target_id: req.body?.target_id,
+        active: req.body?.active,
+      } as any;
+      Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+
+      const { data, error } = await supabase.from("schedules").update(payload).eq("id", req.params.id).select().single();
+      if (error) return res.status(500).json({ error: error.message });
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.delete("/api/schedules/:id", async (req, res) => {
     try {
       const supabase = getSupabase();

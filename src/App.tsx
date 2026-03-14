@@ -546,6 +546,22 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
     }
   };
 
+
+  const handleEdit = async (schedule: Schedule) => {
+    const posting_time = prompt('Update daily posting time (HH:mm)', schedule.posting_time) || schedule.posting_time;
+    const target_id = schedule.target_id;
+    try {
+      const res = await fetch(`/api/schedules/${schedule.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ posting_time, target_id })
+      });
+      if (res.ok) fetchData();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const handleRunNow = async (id: string) => {
     setRunningId(id);
     try {
@@ -595,7 +611,7 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
               : fbPages.find(p => p.id === s.target_id);
             
             return (
-              <div key={s.id} className="p-6 flex items-center justify-between hover:bg-zinc-800/30 transition-colors">
+              <div key={s.id} className="p-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 hover:bg-zinc-800/30 transition-colors">
                 <div className="flex items-center gap-4">
                   <div className={cn(
                     "w-12 h-12 rounded-2xl flex items-center justify-center",
@@ -614,9 +630,18 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                         {type === 'blog' ? (target as BloggerAccount)?.niche : 'Video Content'}
                       </span>
                     </div>
+                    <p className="text-[11px] text-zinc-600 mt-2">Created: {new Date(s.created_at).toLocaleString()}</p>
+                    <p className="text-[11px] mt-1 text-zinc-500">Last Run: {s.last_execution_status || 'Not executed yet'}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => handleEdit(s)}
+                    className="p-3 text-zinc-500 hover:text-amber-400 transition-colors"
+                    title="Edit Schedule"
+                  >
+                    <Clock className="w-5 h-5" />
+                  </button>
                   <button 
                     onClick={() => handleRunNow(s.id)}
                     disabled={runningId === s.id}
