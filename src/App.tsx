@@ -806,7 +806,7 @@ const Settings = () => {
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...settings, ...data })
+        body: JSON.stringify({ _section: section, ...data })
       });
       
       if (!res.ok) {
@@ -815,7 +815,11 @@ const Settings = () => {
         if (errData.error?.includes('column') || errData.error?.includes('relation')) {
           setError(`Database Schema Error: ${errData.error}. Please ensure your 'settings' table has the correct columns. Run the SQL below to fix.`);
         } else {
-          throw new Error(errData.error || 'Failed to save settings');
+          const serverMessage = errData.error || 'Failed to save settings';
+          if (section !== 'supabase' && /invalid api key/i.test(serverMessage)) {
+            throw new Error('Unable to save settings because Supabase credentials are invalid. Please update Supabase Service Role Key first.');
+          }
+          throw new Error(serverMessage);
         }
         return;
       }

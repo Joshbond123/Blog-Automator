@@ -201,18 +201,21 @@ async function startServer() {
 
   app.post("/api/settings", async (req, res) => {
     try {
-      // If updating Supabase config, update the local instance first
-      // This ensures that the upsert below uses the NEW credentials to save to the NEW database
-      if (req.body.supabase_url && req.body.supabase_service_role_key) {
+      const section = req.body?._section;
+      const requestPayload = { ...(req.body || {}) };
+      delete requestPayload._section;
+
+      // Only update runtime Supabase config when user is explicitly saving Supabase settings
+      if (section === 'supabase' && requestPayload.supabase_url && requestPayload.supabase_service_role_key) {
         updateSupabaseConfig({
-          url: req.body.supabase_url,
-          serviceRoleKey: req.body.supabase_service_role_key,
-          anonKey: req.body.supabase_access_token
+          url: requestPayload.supabase_url,
+          serviceRoleKey: requestPayload.supabase_service_role_key,
+          anonKey: requestPayload.supabase_access_token
         });
       }
 
       const supabase = getSupabase();
-      const protectedBody = protectSettings(req.body);
+      const protectedBody = protectSettings(requestPayload);
       const saved = await writeSettings(supabase, protectedBody);
       res.json(saved);
     } catch (err: any) {
@@ -223,8 +226,10 @@ async function startServer() {
 
   app.delete("/api/settings/field/:field", async (req, res) => {
     const allowedFields = new Set([
+      "supabase_url", "supabase_access_token", "supabase_service_role_key",
       "github_pat", "catbox_hash", "ads_html", "ads_scripts", "ads_placement",
-      "blogger_client_id", "blogger_client_secret", "blogger_refresh_token"
+      "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
+      "cloudflare_configs", "elevenlabs_keys", "lightning_keys"
     ]);
     const field = req.params.field;
     if (!allowedFields.has(field)) return res.status(400).json({ error: "Field not allowed" });
