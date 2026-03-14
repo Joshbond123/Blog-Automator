@@ -20,6 +20,12 @@ async function startServer() {
   const PORT = Number(process.env.PORT || 3000);
 
   const SECRET_SETTING_FIELDS = ["blogger_client_id", "blogger_client_secret", "blogger_refresh_token"] as const;
+  const ARRAY_SETTING_FIELDS = new Set(["cloudflare_configs", "elevenlabs_keys", "lightning_keys"]);
+  const SETTINGS_FIELDS = new Set([
+    "supabase_url", "supabase_service_role_key", "supabase_access_token", "github_pat",
+    "cloudflare_configs", "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
+    "elevenlabs_keys", "lightning_keys", "catbox_hash", "ads_html", "ads_scripts", "ads_placement"
+  ]);
 
   const ensureArray = (value: any) => {
     if (Array.isArray(value)) return value;
@@ -39,6 +45,7 @@ async function startServer() {
     normalized.cloudflare_configs = ensureArray(normalized.cloudflare_configs);
     normalized.elevenlabs_keys = ensureArray(normalized.elevenlabs_keys);
     normalized.lightning_keys = ensureArray(normalized.lightning_keys);
+    normalized.ads_placement = normalized.ads_placement || 'after';
 
     if (normalized.cloudflare_configs.length === 0 && normalized.cloudflare_api_keys && normalized.cloudflare_account_id) {
       const oldKeys = String(normalized.cloudflare_api_keys).split(',').map((v: string) => v.trim()).filter(Boolean);
@@ -61,35 +68,87 @@ async function startServer() {
     return protectedSettings;
   };
 
-  const upsertSettingsWithFallback = async (supabase: any, payload: any) => {
-    const currentPayload = { ...payload };
-    const skippedFields: string[] = [];
+  const parseStoredValue = (key: string, value: any) => {
+    if (value == null) return null;
+    if (ARRAY_SETTING_FIELDS.has(key)) return ensureArray(value);
+    return value;
+  };
 
-    while (true) {
-      const { data: existingRows } = await supabase.from("settings").select("*").limit(1);
-      const existingRow = existingRows?.[0];
-      const mutation = existingRow
-        ? supabase
-            .from("settings")
-            .update(currentPayload)
-            .eq(existingRow.setting_key ? "setting_key" : "id", existingRow.setting_key || existingRow.id)
-            .select("*")
-            .limit(1)
-        : supabase.from("settings").insert(currentPayload).select("*").limit(1);
+  const serializeStoredValue = (key: string, value: any) => {
+    if (value === undefined) return null;
+    if (value === null) return null;
+    if (ARRAY_SETTING_FIELDS.has(key)) return JSON.stringify(ensureArray(value));
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+  };
 
-      const { data, error } = await mutation;
-      if (!error) return { data: data?.[0] || null, skippedFields };
+  const isKeyValueSettingsSchema = async (supabase: any) => {
+    const { error } = await supabase.from("settings").select("setting_key,setting_value").limit(1);
+    return !error;
+  };
 
-      const missingColumn =
-        error.message?.match(/Could not find the ['`’]([^'`’]+)['`’] column/)?.[1]
-        || error.message?.match(/column\s+['`’]([^'`’]+)['`’]/)?.[1];
-      if (!missingColumn || !(missingColumn in currentPayload)) {
-        return { data: null, error, skippedFields: [] as string[] } as any;
+  const readSettings = async (supabase: any) => {
+    const keyValueMode = await isKeyValueSettingsSchema(supabase);
+    if (keyValueMode) {
+      const { data, error } = await supabase.from("settings").select("setting_key,setting_value");
+      if (error) throw error;
+      const mapped: any = {};
+      for (const row of data || []) {
+        const key = row.setting_key;
+        if (!SETTINGS_FIELDS.has(key)) continue;
+        mapped[key] = parseStoredValue(key, row.setting_value);
       }
-
-      skippedFields.push(missingColumn);
-      delete currentPayload[missingColumn];
+      return normalizeSettings(mapped);
     }
+
+    const { data, error } = await supabase.from("settings").select("*").limit(1);
+    if (error) throw error;
+    return normalizeSettings((data && data[0]) || {});
+  };
+
+  const writeSettings = async (supabase: any, payload: any) => {
+    const keyValueMode = await isKeyValueSettingsSchema(supabase);
+    const safePayload = Object.fromEntries(Object.entries(payload || {}).filter(([k]) => SETTINGS_FIELDS.has(k)));
+
+    if (keyValueMode) {
+      const rows = Object.entries(safePayload).map(([setting_key, rawValue]) => ({
+        setting_key,
+        setting_value: serializeStoredValue(setting_key, rawValue),
+      }));
+      if (rows.length > 0) {
+        const { error } = await supabase.from("settings").upsert(rows, { onConflict: "setting_key" });
+        if (error) throw error;
+      }
+      return readSettings(supabase);
+    }
+
+    const { data: existingRows } = await supabase.from("settings").select("*").limit(1);
+    const row = existingRows?.[0];
+    if (row?.id) {
+      const { error } = await supabase.from("settings").update(safePayload).eq("id", row.id);
+      if (error) throw error;
+    } else {
+      const { error } = await supabase.from("settings").insert({ id: 1, ...safePayload });
+      if (error) throw error;
+    }
+    return readSettings(supabase);
+  };
+
+  const deleteSettingFieldInStorage = async (supabase: any, field: string) => {
+    const keyValueMode = await isKeyValueSettingsSchema(supabase);
+    if (keyValueMode) {
+      if (field === "ads_placement") {
+        const { error } = await supabase.from("settings").upsert({ setting_key: field, setting_value: "after" }, { onConflict: "setting_key" });
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from("settings").delete().eq("setting_key", field);
+        if (error) throw error;
+      }
+      return readSettings(supabase);
+    }
+
+    const resetValue = field === "ads_placement" ? "after" : null;
+    return writeSettings(supabase, { [field]: resetValue });
   };
 
   app.use(express.json());
@@ -120,10 +179,7 @@ async function startServer() {
   app.get("/api/settings", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const { data, error } = await supabase.from("settings").select("*").limit(1);
-      if (error) return res.status(500).json({ error: error.message });
-
-      const normalized = normalizeSettings((data && data[0]) || {});
+      const normalized = await readSettings(supabase);
       const cfg = getCurrentSupabaseConfig();
       if (!normalized.supabase_url && cfg.url) normalized.supabase_url = cfg.url;
       if (!normalized.supabase_access_token && cfg.anonKey) normalized.supabase_access_token = cfg.anonKey;
@@ -156,18 +212,9 @@ async function startServer() {
       }
 
       const supabase = getSupabase();
-      
-      // Filter out fields that might cause issues if the user hasn't updated their schema yet
-      // but we want to allow them to save what they can.
-      // However, upserting with missing columns is what causes the user's error.
       const protectedBody = protectSettings(req.body);
-      const { data, error, skippedFields } = await upsertSettingsWithFallback(supabase, protectedBody);
-      
-      if (error) {
-        console.error("Supabase settings upsert error:", error);
-        return res.status(500).json({ error: error.message });
-      }
-      res.json({ ...normalizeSettings(data), _skipped_fields: skippedFields || [] });
+      const saved = await writeSettings(supabase, protectedBody);
+      res.json(saved);
     } catch (err: any) {
       console.error("Settings save error:", err);
       res.status(400).json({ error: err.message });
@@ -184,10 +231,8 @@ async function startServer() {
 
     try {
       const supabase = getSupabase();
-      const resetValue = field === "ads_placement" ? "after" : null;
-      const { data, error, skippedFields } = await upsertSettingsWithFallback(supabase, { [field]: resetValue });
-      if (error) return res.status(500).json({ error: error.message });
-      res.json({ ...normalizeSettings(data), _skipped_fields: skippedFields || [] });
+      const updated = await deleteSettingFieldInStorage(supabase, field);
+      res.json(updated);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -198,7 +243,7 @@ async function startServer() {
     try {
       if (url && service_role_key) {
         const tempClient = createVerifiedSupabaseClient(url, service_role_key);
-        const { error } = await tempClient.from("settings").select("id").limit(1);
+        const { error } = await tempClient.from("settings").select("*").limit(1);
         if (error) throw error;
         return res.json({ status: "connected" });
       }
@@ -254,8 +299,7 @@ async function startServer() {
     try {
       const supabase = getSupabase();
 
-      const { data: settingsRows } = await supabase.from("settings").select("*").limit(1);
-      const settings = normalizeSettings((settingsRows && settingsRows[0]) || {});
+      const settings = await readSettings(supabase);
 
 
       if (!settings.blogger_client_id || !settings.blogger_client_secret || !settings.blogger_refresh_token) {

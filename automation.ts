@@ -34,8 +34,41 @@ function normalizeUsageEntry(entry: any): KeyUsage {
   };
 }
 
-async function getSettings() {
-  const supabase = getSupabase();
+const ARRAY_SETTING_FIELDS = new Set(['cloudflare_configs', 'elevenlabs_keys', 'lightning_keys']);
+const KEY_VALUE_SETTING_FIELDS = new Set([
+  'supabase_url', 'supabase_service_role_key', 'supabase_access_token', 'github_pat',
+  'cloudflare_configs', 'blogger_client_id', 'blogger_client_secret', 'blogger_refresh_token',
+  'elevenlabs_keys', 'lightning_keys', 'catbox_hash', 'ads_html', 'ads_scripts', 'ads_placement',
+  'cloudflare_rotation_index', 'elevenlabs_rotation_index', 'lightning_rotation_index'
+]);
+
+async function isKeyValueSettingsSchema(supabase: any) {
+  const { error } = await supabase.from('settings').select('setting_key,setting_value').limit(1);
+  return !error;
+}
+
+function parseStoredValue(key: string, value: any) {
+  if (value == null) return null;
+  if (ARRAY_SETTING_FIELDS.has(key)) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+      try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
+    }
+    return [];
+  }
+
+  if (key.endsWith('_rotation_index')) return Number(value || 0);
+  return value;
+}
+
+function serializeStoredValue(key: string, value: any) {
+  if (value === undefined || value === null) return null;
+  if (ARRAY_SETTING_FIELDS.has(key)) return JSON.stringify(Array.isArray(value) ? value : []);
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+async function getSettings() {  const supabase = getSupabase();
   const { data } = await supabase.from('settings').select('*').limit(1);
   const settings = (data && data[0]) || {};
 
@@ -64,18 +97,26 @@ async function getSettings() {
 
 async function saveSettingsPatch(patch: Record<string, any>) {
   const supabase = getSupabase();
+  const keyValueMode = await isKeyValueSettingsSchema(supabase);
 
-  const { data: rows } = await supabase.from('settings').select('*').limit(1);
-  const row = rows?.[0];
-  if (row) {
-    const selectorColumn = row.setting_key ? 'setting_key' : 'id';
-    const selectorValue = row.setting_key || row.id;
-    await supabase.from('settings').update(patch).eq(selectorColumn, selectorValue);
+  if (keyValueMode) {
+    const rows = Object.entries(patch)
+      .filter(([key]) => KEY_VALUE_SETTING_FIELDS.has(key))
+      .map(([setting_key, value]) => ({ setting_key, setting_value: serializeStoredValue(setting_key, value) }));
+    if (rows.length > 0) {
+      await supabase.from('settings').upsert(rows, { onConflict: 'setting_key' });
+    }
     return;
   }
 
-  await supabase.from('settings').insert(patch);
+  const { data: rows } = await supabase.from('settings').select('id').limit(1);
+  const row = rows?.[0];
+  if (row?.id) {
+    await supabase.from('settings').update(patch).eq('id', row.id);
+    return;
+  }
 
+  await supabase.from('settings').insert({ id: 1, ...patch });
 }
 
 function getEntryKey(entry: any) {

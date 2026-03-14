@@ -822,9 +822,6 @@ const Settings = () => {
       
       const updated = await res.json();
       setSettings(normalizeClientSettings(updated));
-      if (Array.isArray(updated?._skipped_fields) && updated._skipped_fields.length > 0) {
-        setError(`Saved with schema limitations. Missing columns: ${updated._skipped_fields.join(', ')}`);
-      }
       await fetchData();
       
       // If we just saved Supabase settings, re-verify status

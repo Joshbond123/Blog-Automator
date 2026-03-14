@@ -105,7 +105,7 @@ export async function verifyCurrentSupabaseConnection() {
 
   try {
     const client = getSupabase();
-    const { error } = await client.from("settings").select("id").limit(1);
+    const { error } = await client.from("settings").select("*").limit(1);
     if (error) throw error;
     return { configured: true, connected: true, source: configSource };
   } catch {
