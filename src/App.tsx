@@ -730,6 +730,28 @@ const Settings = () => {
   const hasGitHubSaved = Boolean(settings.github_pat);
   const hasCatboxSaved = Boolean(settings.catbox_hash);
   const hasAdsSaved = Boolean(settings.ads_html || settings.ads_scripts || settings.ads_placement);
+  const normalizeClientSettings = (raw: any = {}) => {
+    const safeArray = (value: any) => {
+      if (Array.isArray(value)) return value;
+      if (typeof value === 'string') {
+        try {
+          const parsed = JSON.parse(value);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+      return [];
+    };
+
+    return {
+      ...raw,
+      cloudflare_configs: safeArray(raw.cloudflare_configs),
+      elevenlabs_keys: safeArray(raw.elevenlabs_keys),
+      lightning_keys: safeArray(raw.lightning_keys),
+      ads_placement: raw.ads_placement || 'after'
+    };
+  };
 
   useEffect(() => {
     fetchData();
@@ -742,7 +764,7 @@ const Settings = () => {
         fetch('/api/facebook-pages').then(r => r.ok ? r.json() : []),
         fetch('/api/supabase/status').then(r => r.ok ? r.json() : null)
       ]);
-      setSettings(setRes);
+      setSettings(normalizeClientSettings(setRes));
       setFbPages(fbRes);
 
       if (statusRes?.connected) {
@@ -799,7 +821,11 @@ const Settings = () => {
       }
       
       const updated = await res.json();
-      setSettings(updated);
+      setSettings(normalizeClientSettings(updated));
+      if (Array.isArray(updated?._skipped_fields) && updated._skipped_fields.length > 0) {
+        setError(`Saved with schema limitations. Missing columns: ${updated._skipped_fields.join(', ')}`);
+      }
+      await fetchData();
       
       // If we just saved Supabase settings, re-verify status
       if (section === 'supabase') {
@@ -829,7 +855,8 @@ const Settings = () => {
       const res = await fetch(`/api/settings/field/${field}`, { method: 'DELETE' });
       if (res.ok) {
         const updated = await res.json();
-        setSettings(updated);
+        setSettings(normalizeClientSettings(updated));
+        await fetchData();
       }
     } catch (err) {
       console.error(err);

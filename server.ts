@@ -21,11 +21,30 @@ async function startServer() {
 
   const SECRET_SETTING_FIELDS = ["blogger_client_id", "blogger_client_secret", "blogger_refresh_token"] as const;
 
+  const ensureArray = (value: any) => {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    }
+    return [];
+  };
+
   const normalizeSettings = (settings: any = {}) => {
     const normalized = { ...settings };
-    if (!normalized.cloudflare_configs) normalized.cloudflare_configs = [];
-    if (!normalized.elevenlabs_keys) normalized.elevenlabs_keys = [];
-    if (!normalized.lightning_keys) normalized.lightning_keys = [];
+    normalized.cloudflare_configs = ensureArray(normalized.cloudflare_configs);
+    normalized.elevenlabs_keys = ensureArray(normalized.elevenlabs_keys);
+    normalized.lightning_keys = ensureArray(normalized.lightning_keys);
+
+    if (normalized.cloudflare_configs.length === 0 && normalized.cloudflare_api_keys && normalized.cloudflare_account_id) {
+      const oldKeys = String(normalized.cloudflare_api_keys).split(',').map((v: string) => v.trim()).filter(Boolean);
+      normalized.cloudflare_configs = oldKeys.map((key: string) => ({ account_id: normalized.cloudflare_account_id, api_key: key }));
+    }
+
     for (const field of SECRET_SETTING_FIELDS) {
       normalized[field] = decryptSecret(normalized[field]);
     }
@@ -44,6 +63,7 @@ async function startServer() {
 
   const upsertSettingsWithFallback = async (supabase: any, payload: any) => {
     const currentPayload = { ...payload };
+    const skippedFields: string[] = [];
 
     while (true) {
       const { data: existingRows } = await supabase.from("settings").select("*").limit(1);
@@ -58,7 +78,7 @@ async function startServer() {
         : supabase.from("settings").insert(currentPayload).select("*").limit(1);
 
       const { data, error } = await mutation;
-      if (!error) return { data: data?.[0] || null, skippedFields: [] as string[] };
+      if (!error) return { data: data?.[0] || null, skippedFields };
 
       const missingColumn =
         error.message?.match(/Could not find the ['`’]([^'`’]+)['`’] column/)?.[1]
@@ -67,6 +87,7 @@ async function startServer() {
         return { data: null, error, skippedFields: [] as string[] } as any;
       }
 
+      skippedFields.push(missingColumn);
       delete currentPayload[missingColumn];
     }
   };
@@ -140,13 +161,13 @@ async function startServer() {
       // but we want to allow them to save what they can.
       // However, upserting with missing columns is what causes the user's error.
       const protectedBody = protectSettings(req.body);
-      const { data, error } = await upsertSettingsWithFallback(supabase, protectedBody);
+      const { data, error, skippedFields } = await upsertSettingsWithFallback(supabase, protectedBody);
       
       if (error) {
         console.error("Supabase settings upsert error:", error);
         return res.status(500).json({ error: error.message });
       }
-      res.json(normalizeSettings(data));
+      res.json({ ...normalizeSettings(data), _skipped_fields: skippedFields || [] });
     } catch (err: any) {
       console.error("Settings save error:", err);
       res.status(400).json({ error: err.message });
@@ -164,9 +185,9 @@ async function startServer() {
     try {
       const supabase = getSupabase();
       const resetValue = field === "ads_placement" ? "after" : null;
-      const { data, error } = await upsertSettingsWithFallback(supabase, { [field]: resetValue });
+      const { data, error, skippedFields } = await upsertSettingsWithFallback(supabase, { [field]: resetValue });
       if (error) return res.status(500).json({ error: error.message });
-      res.json(normalizeSettings(data));
+      res.json({ ...normalizeSettings(data), _skipped_fields: skippedFields || [] });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
