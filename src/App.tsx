@@ -387,7 +387,7 @@ const BloggerAccounts = () => {
           {availableAccounts.map((blog) => {
             const connected = connectedByBloggerId.has(blog.blogger_id);
             return (
-              <div key={blog.blogger_id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between gap-4">
+              <div key={blog.blogger_id} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 gap-4">
                 <div>
                   <p className="text-white font-bold">{blog.name}</p>
                   <p className="text-zinc-500 text-xs font-mono">{blog.blogger_id}</p>
@@ -974,7 +974,7 @@ const Settings = () => {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
             transition={{ duration: 0.2 }}
-            className="max-w-4xl mx-auto"
+            className="max-w-6xl mx-auto"
           >
             {error && (
               <motion.div 
@@ -1042,7 +1042,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </div>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="grid grid-cols-1 gap-8">
                     <div className="space-y-3">
                       <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Supabase URL</label>
@@ -1104,7 +1104,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </div>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
                     {hasSupabaseSaved ? (
                       <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-3">
                         <p className="text-white font-semibold break-all">{settings.supabase_url || 'URL not set'}</p>
@@ -1135,7 +1135,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Global OAuth credentials used for all Blogger connections and publishing.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-3">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Client ID</label>
                     <div className="relative group">
@@ -1192,9 +1192,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </button>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
                     {hasBloggerSaved ? (
-                    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
+                    <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20">
                       <p className="text-zinc-400 text-sm">Saved Blogger OAuth credentials.</p>
 
                       <div className="flex items-center gap-3">
@@ -1244,7 +1244,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Connect your GitHub account for Actions and Remotion pipelines.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-3">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Personal Access Token (PAT)</label>
                     <div className="relative group">
@@ -1270,9 +1270,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </button>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
                     {hasGitHubSaved ? (
-                      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
+                      <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20">
                         <div>
                           <p className="text-zinc-400 text-sm">Saved PAT: <span className="text-white font-mono">{maskValue(settings.github_pat)}</span></p>
                           <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Connected</p>
@@ -1294,7 +1294,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Add multiple Workers AI configurations for automatic rotation.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="space-y-2">
                       <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Account ID</label>
@@ -1333,9 +1333,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </button>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Active Configurations</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured Integrations</h4>
                     {settings.cloudflare_configs?.map((config: any, idx: number) => (
-                      <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between group hover:border-zinc-700 transition-colors">
+                      <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-zinc-700 transition-colors">
                         <div className="flex items-center gap-4">
                           <div className="w-10 h-10 bg-orange-500/10 rounded-xl flex items-center justify-center">
                             <Cloud className="text-orange-500 w-5 h-5" />
@@ -1391,7 +1391,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Connect and manage your Facebook Pages for automated posting.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-4">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Access Token</label>
                     <div className="flex flex-col sm:flex-row gap-4">
@@ -1422,7 +1422,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       </h4>
                       <div className="grid grid-cols-1 gap-3">
                         {fetchedFbPages.map(page => (
-                          <div key={page.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between group hover:border-indigo-500/50 transition-all">
+                          <div key={page.id} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-indigo-500/50 transition-all">
                             <div className="flex items-center gap-4">
                               <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
                                 <Facebook className="text-indigo-500 w-5 h-5" />
@@ -1447,10 +1447,10 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   )}
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Connected Pages</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured Integrations</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {fbPages.map(page => (
-                        <div key={page.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 flex items-center justify-between group hover:border-zinc-700 transition-colors">
+                        <div key={page.id} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between group hover:border-zinc-700 transition-colors shadow-lg shadow-black/20">
                           <div className="flex items-center gap-4">
                             <div className="w-12 h-12 bg-blue-500/10 rounded-xl flex items-center justify-center">
                               <Facebook className="text-blue-500 w-6 h-6" />
@@ -1495,7 +1495,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Add multiple API keys for voice generation with automatic rotation.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-4">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">New API Key</label>
                     <div className="flex flex-col sm:flex-row gap-4">
@@ -1522,10 +1522,10 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </div>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Active API Keys</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured API Keys</h4>
                     <div className="space-y-3">
                       {settings.elevenlabs_keys?.map((item: any, idx: number) => (
-                        <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between group hover:border-zinc-700 transition-colors">
+                        <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-zinc-700 transition-colors">
                           <div className="flex items-center gap-4">
                             <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
                               <Mic className="text-indigo-500 w-5 h-5" />
@@ -1585,7 +1585,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Manage multiple API keys for high-performance video rendering.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-4">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">New API Key</label>
                     <div className="flex flex-col sm:flex-row gap-4">
@@ -1612,10 +1612,10 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </div>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Active API Keys</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured API Keys</h4>
                     <div className="space-y-3">
                       {settings.lightning_keys?.map((item: any, idx: number) => (
-                        <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between group hover:border-zinc-700 transition-colors">
+                        <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-zinc-700 transition-colors">
                           <div className="flex items-center gap-4">
                             <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
                               <Video className="text-indigo-500 w-5 h-5" />
@@ -1671,7 +1671,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Configure your Catbox user hash for hosting blog images and videos.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-3">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">User Hash</label>
                     <div className="relative group">
@@ -1697,9 +1697,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </button>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
                     {hasCatboxSaved ? (
-                      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
+                      <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20">
                         <div>
                           <p className="text-zinc-400 text-sm">Saved Catbox.moe</p>
                           <p className="text-white font-mono text-xs">{maskValue(settings.catbox_hash)}</p>
@@ -1725,7 +1725,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Configure advertisements to be automatically injected into your Blogger posts.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-6">
                     <div className="space-y-3">
                       <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Ad Placement</label>
@@ -1790,9 +1790,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   </button>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
                     {hasAdsSaved ? (
-                      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 space-y-3">
+                      <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 space-y-3 shadow-lg shadow-black/20">
                         <p className="text-zinc-400 text-sm">Saved Ads Configuration</p>
                         <p className="text-xs text-zinc-500">Placement: <span className="text-white">{settings.ads_placement || 'after'}</span></p>
                         <p className="text-xs text-zinc-500">HTML: <span className="text-white">{settings.ads_html ? `${settings.ads_html.length} chars` : 'Not set'}</span></p>
