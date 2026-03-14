@@ -288,12 +288,12 @@ const Dashboard = () => {
 
 const BloggerAccounts = () => {
   const [accounts, setAccounts] = useState<BloggerAccount[]>([]);
+  const [availableAccounts, setAvailableAccounts] = useState<Array<{ blogger_id: string; name: string; url: string }>>([]);
   const [facebookPages, setFacebookPages] = useState<FacebookPage[]>([]);
-  const [showAddModal, setShowAddModal] = useState(false);
   const [showConnectFbModal, setShowConnectFbModal] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-
-  const [newAccount, setNewAccount] = useState({ blogger_id: '', niche: NICHES[0] });
+  const [connectTarget, setConnectTarget] = useState<{ blogger_id: string; name: string; url: string } | null>(null);
+  const [selectedNiche, setSelectedNiche] = useState<Niche>(NICHES[0]);
 
   useEffect(() => {
     fetchData();
@@ -301,36 +301,53 @@ const BloggerAccounts = () => {
 
   const fetchData = async () => {
     try {
-      const [accRes, fbRes] = await Promise.all([
+      const [accRes, fbRes, availableRes] = await Promise.all([
         fetch('/api/blogger-accounts').then(r => r.ok ? r.json() : []),
-        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : [])
+        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : []),
+        fetch('/api/blogger/available-accounts').then(async r => r.ok ? r.json() : [])
       ]);
       setAccounts(accRes);
       setFacebookPages(fbRes);
+      setAvailableAccounts(availableRes);
     } catch (err) {
       console.error(err);
+      setAvailableAccounts([]);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleAddAccount = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const connectedByBloggerId = new Set(accounts.map(a => a.blogger_id));
+
+  const handleConnectAccount = async () => {
+    if (!connectTarget) return;
+
     try {
       const res = await fetch('/api/blogger-accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...newAccount,
-          name: `Blog ${newAccount.blogger_id.slice(0, 4)}`, // Mock name for now, real logic would fetch from API
-          url: `https://${newAccount.blogger_id}.blogspot.com`,
+          blogger_id: connectTarget.blogger_id,
+          name: connectTarget.name,
+          url: connectTarget.url,
+          niche: selectedNiche,
           status: 'connected'
         })
       });
       if (res.ok) {
-        setShowAddModal(false);
-        fetchData();
+        setConnectTarget(null);
+        await fetchData();
       }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleDisconnect = async (account: BloggerAccount) => {
+    if (!confirm(`Disconnect ${account.name}?`)) return;
+    try {
+      await fetch(`/api/blogger-accounts/${account.id}`, { method: 'DELETE' });
+      await fetchData();
     } catch (err) {
       console.error(err);
     }
@@ -338,7 +355,6 @@ const BloggerAccounts = () => {
 
   const handleConnectFb = async (bloggerAccountId: string, facebookPageId: string) => {
     try {
-      // Real update logic
       const res = await fetch(`/api/blogger-accounts/${bloggerAccountId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -357,182 +373,113 @@ const BloggerAccounts = () => {
 
   return (
     <div className="flex-1 p-8 space-y-8">
-      <header className="flex items-center justify-between">
-        <div>
-          <h2 className="text-3xl font-bold text-white tracking-tight">Blogger Accounts</h2>
-          <p className="text-zinc-400 mt-1">Manage your connected blogs and link them to Facebook pages.</p>
-        </div>
-        <button 
-          onClick={() => setShowAddModal(true)}
-          className="bg-indigo-600 text-white px-6 py-3 rounded-2xl font-bold flex items-center gap-2 hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20"
-        >
-          <Plus className="w-5 h-5" /> Add Blogger Account
-        </button>
+      <header>
+        <h2 className="text-3xl font-bold text-white tracking-tight">Blogger Accounts</h2>
+        <p className="text-zinc-400 mt-1">Manage your connected blogs and link them to Facebook pages.</p>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
+        <h3 className="text-xl font-bold text-white">Available Blogger Accounts</h3>
+        {availableAccounts.length === 0 && (
+          <p className="text-zinc-500">No Blogger accounts found. Save valid Blogger OAuth credentials in Settings, then refresh.</p>
+        )}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {availableAccounts.map((blog) => {
+            const connected = connectedByBloggerId.has(blog.blogger_id);
+            return (
+              <div key={blog.blogger_id} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 gap-4">
+                <div>
+                  <p className="text-white font-bold">{blog.name}</p>
+                  <p className="text-zinc-500 text-xs font-mono">{blog.blogger_id}</p>
+                  <a href={blog.url} target="_blank" rel="noreferrer" className="text-indigo-400 text-xs hover:text-indigo-300 break-all">{blog.url}</a>
+                </div>
+                <button
+                  onClick={() => {
+                    if (!connected) {
+                      setSelectedNiche(NICHES[0]);
+                      setConnectTarget(blog);
+                    }
+                  }}
+                  disabled={connected}
+                  className={cn(
+                    "px-4 py-2 rounded-xl text-sm font-bold",
+                    connected ? "bg-emerald-500/10 text-emerald-500 cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-500"
+                  )}
+                >
+                  {connected ? 'Connected' : 'Connect'}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {accounts.map((acc) => (
-          <motion.div 
+          <motion.div
             layout
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
-            key={acc.id} 
+            key={acc.id}
             className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-xl flex flex-col"
           >
             <div className="flex items-center justify-between mb-4">
               <div className="w-12 h-12 bg-orange-500/10 rounded-2xl flex items-center justify-center">
                 <Globe className="text-orange-500 w-6 h-6" />
               </div>
-              <span className={cn(
-                "px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider",
-                acc.status === 'connected' ? "bg-emerald-500/10 text-emerald-500" : "bg-rose-500/10 text-rose-500"
-              )}>
-                {acc.status}
-              </span>
+              <span className={cn("px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider", acc.status === 'connected' ? "bg-emerald-500/10 text-emerald-500" : "bg-rose-500/10 text-rose-500")}>{acc.status}</span>
             </div>
             <h3 className="text-xl font-bold text-white">{acc.name}</h3>
             <p className="text-zinc-500 text-sm font-mono mt-1">ID: {acc.blogger_id}</p>
-            <div className="mt-4 space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-zinc-400">Niche:</span>
-                <span className="text-indigo-400 font-medium">{acc.niche}</span>
-              </div>
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-zinc-400">URL:</span>
-                <a href={acc.url} target="_blank" rel="noreferrer" className="text-zinc-300 hover:text-white flex items-center gap-1">
-                  Visit <ExternalLink className="w-3 h-3" />
-                </a>
-              </div>
-            </div>
-            
+            <a href={acc.url} target="_blank" rel="noreferrer" className="text-indigo-400 text-xs mt-2 hover:text-indigo-300 break-all">{acc.url}</a>
+            <p className="text-indigo-400 text-sm mt-2">{acc.niche}</p>
+
             <div className="mt-6 pt-6 border-t border-zinc-800 flex flex-col gap-3">
-              {acc.facebook_page_id ? (
-                <div className="flex items-center justify-between bg-zinc-950 p-3 rounded-2xl border border-zinc-800">
-                  <div className="flex items-center gap-2">
-                    <Facebook className="w-4 h-4 text-blue-500" />
-                    <span className="text-sm text-zinc-300 font-medium">
-                      {facebookPages.find(p => p.id === acc.facebook_page_id)?.name || 'Connected Page'}
-                    </span>
-                  </div>
-                  <button className="text-zinc-500 hover:text-rose-500 transition-colors">
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ) : (
-                <button 
-                  onClick={() => setShowConnectFbModal(acc.id)}
-                  className="w-full py-3 rounded-2xl bg-zinc-800 text-zinc-300 font-bold text-sm hover:bg-zinc-700 transition-colors flex items-center justify-center gap-2"
-                >
-                  <Facebook className="w-4 h-4" /> Connect Facebook Page
-                </button>
-              )}
+              <button onClick={() => setShowConnectFbModal(acc.id)} className="w-full py-3 rounded-2xl bg-zinc-800 text-zinc-300 font-bold text-sm hover:bg-zinc-700 transition-colors flex items-center justify-center gap-2">
+                <Facebook className="w-4 h-4" /> Connect Facebook Page
+              </button>
+              <button onClick={() => handleDisconnect(acc)} className="w-full py-3 rounded-2xl bg-rose-500/10 text-rose-400 font-bold text-sm hover:bg-rose-500/20 transition-colors">
+                Disconnect Blogger Account
+              </button>
             </div>
           </motion.div>
         ))}
-      </div>
+      </section>
 
-      {/* Add Account Modal */}
       <AnimatePresence>
-        {showAddModal && (
+        {connectTarget && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowAddModal(false)}
-              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden"
-            >
-              <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
-                <h3 className="text-xl font-bold text-white">Add Blogger Account</h3>
-                <button onClick={() => setShowAddModal(false)} className="text-zinc-500 hover:text-white">
-                  <X className="w-6 h-6" />
-                </button>
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setConnectTarget(null)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden p-6 space-y-6">
+              <h3 className="text-xl font-bold text-white">Connect {connectTarget.name}</h3>
+              <div className="space-y-2">
+                <label className="text-sm font-medium text-zinc-400">Select Niche</label>
+                <select value={selectedNiche} onChange={(e) => setSelectedNiche(e.target.value as Niche)} className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white">
+                  {NICHES.map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
               </div>
-              <form onSubmit={handleAddAccount} className="p-6 space-y-6">
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-zinc-400">Blogger Blog ID</label>
-                  <input 
-                    required
-                    type="text" 
-                    value={newAccount.blogger_id}
-                    onChange={(e) => setNewAccount({ ...newAccount, blogger_id: e.target.value })}
-                    placeholder="e.g. 1234567890"
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-colors"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="text-sm font-medium text-zinc-400">Select Niche</label>
-                  <select 
-                    value={newAccount.niche}
-                    onChange={(e) => setNewAccount({ ...newAccount, niche: e.target.value as Niche })}
-                    className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-colors appearance-none"
-                  >
-                    {NICHES.map(n => <option key={n} value={n}>{n}</option>)}
-                  </select>
-                </div>
-                <button 
-                  type="submit"
-                  className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20"
-                >
-                  Add Blogger Account
-                </button>
-              </form>
+              <button onClick={handleConnectAccount} className="w-full bg-indigo-600 text-white py-3 rounded-2xl font-bold hover:bg-indigo-500">Connect Account</button>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
 
-      {/* Connect FB Modal */}
       <AnimatePresence>
         {showConnectFbModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowConnectFbModal(null)}
-              className="absolute inset-0 bg-black/80 backdrop-blur-sm"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.9, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden"
-            >
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowConnectFbModal(null)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden">
               <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
                 <h3 className="text-xl font-bold text-white">Connect Facebook Page</h3>
-                <button onClick={() => setShowConnectFbModal(null)} className="text-zinc-500 hover:text-white">
-                  <X className="w-6 h-6" />
-                </button>
+                <button onClick={() => setShowConnectFbModal(null)} className="text-zinc-500 hover:text-white"><X className="w-6 h-6" /></button>
               </div>
               <div className="p-6 space-y-4">
-                {facebookPages.length === 0 ? (
-                  <div className="text-center py-8">
-                    <p className="text-zinc-500 italic">No Facebook pages found. Add them in Settings.</p>
-                  </div>
-                ) : (
-                  facebookPages.map(page => (
-                    <button
-                      key={page.id}
-                      onClick={() => handleConnectFb(showConnectFbModal, page.id)}
-                      className="w-full flex items-center justify-between p-4 bg-zinc-950 border border-zinc-800 rounded-2xl hover:border-indigo-500 transition-all group"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 bg-blue-500/10 rounded-xl flex items-center justify-center">
-                          <Facebook className="text-blue-500 w-5 h-5" />
-                        </div>
-                        <span className="text-white font-medium">{page.name}</span>
-                      </div>
-                      <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-indigo-400 transition-colors" />
-                    </button>
-                  ))
-                )}
+                {facebookPages.length === 0 ? <p className="text-zinc-500">No Facebook pages found.</p> : facebookPages.map(page => (
+                  <button key={page.id} onClick={() => handleConnectFb(showConnectFbModal, page.id)} className="w-full flex items-center justify-between p-4 bg-zinc-950 border border-zinc-800 rounded-2xl hover:border-indigo-500 transition-all group">
+                    <span className="text-white font-medium">{page.name}</span>
+                    <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-indigo-400" />
+                  </button>
+                ))}
               </div>
             </motion.div>
           </div>
@@ -774,6 +721,39 @@ const Settings = () => {
   const [fetchingFb, setFetchingFb] = useState(false);
   const [supabaseStatus, setSupabaseStatus] = useState<'idle' | 'verifying' | 'connected' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const maskValue = (value?: string, start = 6, end = 4) => {
+    if (!value) return 'Not set';
+    if (value.length <= start + end) return '•'.repeat(Math.max(value.length, 8));
+    return `${value.slice(0, start)}...${value.slice(-end)}`;
+  };
+
+  const hasSupabaseSaved = Boolean(settings.supabase_url || settings.supabase_access_token || settings.supabase_service_role_key);
+  const hasBloggerSaved = Boolean(settings.blogger_client_id || settings.blogger_client_secret || settings.blogger_refresh_token);
+  const hasGitHubSaved = Boolean(settings.github_pat);
+  const hasCatboxSaved = Boolean(settings.catbox_hash);
+  const hasAdsSaved = Boolean(settings.ads_html || settings.ads_scripts || settings.ads_placement);
+  const normalizeClientSettings = (raw: any = {}) => {
+    const safeArray = (value: any) => {
+      if (Array.isArray(value)) return value;
+      if (typeof value === 'string') {
+        try {
+          const parsed = JSON.parse(value);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+      return [];
+    };
+
+    return {
+      ...raw,
+      cloudflare_configs: safeArray(raw.cloudflare_configs),
+      elevenlabs_keys: safeArray(raw.elevenlabs_keys),
+      lightning_keys: safeArray(raw.lightning_keys),
+      ads_placement: raw.ads_placement || 'after'
+    };
+  };
 
   useEffect(() => {
     fetchData();
@@ -781,16 +761,20 @@ const Settings = () => {
 
   const fetchData = async () => {
     try {
-      const [setRes, fbRes] = await Promise.all([
+      const [setRes, fbRes, statusRes] = await Promise.all([
         fetch('/api/settings').then(r => r.ok ? r.json() : {} as any),
-        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : [])
+        fetch('/api/facebook-pages').then(r => r.ok ? r.json() : []),
+        fetch('/api/supabase/status').then(r => r.ok ? r.json() : null)
       ]);
-      setSettings(setRes);
+      setSettings(normalizeClientSettings(setRes));
       setFbPages(fbRes);
-      
-      // Auto-verify Supabase if credentials exist
-      if (setRes && (setRes as any).supabase_url && (setRes as any).supabase_service_role_key) {
-        verifySupabase((setRes as any).supabase_url, (setRes as any).supabase_service_role_key);
+
+      if (statusRes?.connected) {
+        setSupabaseStatus('connected');
+      } else if (statusRes?.configured) {
+        setSupabaseStatus('error');
+      } else {
+        setSupabaseStatus('idle');
       }
     } catch (err) {
       console.error(err);
@@ -824,7 +808,7 @@ const Settings = () => {
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...settings, ...data })
+        body: JSON.stringify({ _section: section, ...data })
       });
       
       if (!res.ok) {
@@ -833,23 +817,29 @@ const Settings = () => {
         if (errData.error?.includes('column') || errData.error?.includes('relation')) {
           setError(`Database Schema Error: ${errData.error}. Please ensure your 'settings' table has the correct columns. Run the SQL below to fix.`);
         } else {
-          throw new Error(errData.error || 'Failed to save settings');
+          const serverMessage = errData.error || 'Failed to save settings';
+          if (section !== 'supabase' && /invalid api key/i.test(serverMessage)) {
+            throw new Error('Unable to save settings because Supabase credentials are invalid. Please update Supabase Service Role Key first.');
+          }
+          throw new Error(serverMessage);
         }
         return;
       }
       
       const updated = await res.json();
-      setSettings(updated);
+      setSettings(normalizeClientSettings(updated));
+      await fetchData();
       
       // If we just saved Supabase settings, re-verify status
       if (section === 'supabase') {
+        const hasManualCredentials = Boolean(data.supabase_url && data.supabase_service_role_key);
         const verifyRes = await fetch('/api/settings/verify-supabase', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
+          body: JSON.stringify(hasManualCredentials ? {
             url: data.supabase_url,
             service_role_key: data.supabase_service_role_key
-          })
+          } : {})
         });
         if (verifyRes.ok) setSupabaseStatus('connected');
         else setSupabaseStatus('error');
@@ -863,28 +853,39 @@ const Settings = () => {
     }
   };
 
+  const deleteSettingField = async (field: string) => {
+    try {
+      const res = await fetch(`/api/settings/field/${field}`, { method: 'DELETE' });
+      if (res.ok) {
+        const updated = await res.json();
+        setSettings(normalizeClientSettings(updated));
+        await fetchData();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   const handleFetchFbPages = async () => {
     if (!fbToken) return;
     setFetchingFb(true);
     try {
-      // Simulate fetching pages from FB Graph API
-      const res = await fetch('/api/facebook/verify-token', {
+      const res = await fetch('/api/facebook/pages-from-token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: fbToken })
       });
       
       if (res.ok) {
-        // In a real app, this would return the actual pages
-        // For now, we'll simulate a list of pages found for this token
-        setFetchedFbPages([
-          { id: 'ext_1', name: 'Tech News Daily', category: 'Technology' },
-          { id: 'ext_2', name: 'Life Hacks Pro', category: 'Lifestyle' },
-          { id: 'ext_3', name: 'Mystery World', category: 'Entertainment' }
-        ]);
+        const payload = await res.json();
+        setFetchedFbPages(payload.pages || []);
+      } else {
+        const errorPayload = await res.json();
+        throw new Error(errorPayload.error || 'Failed to fetch Facebook pages');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setError(err.message || 'Failed to fetch Facebook pages');
     } finally {
       setFetchingFb(false);
     }
@@ -898,7 +899,7 @@ const Settings = () => {
         body: JSON.stringify({
           page_id: page.id,
           name: page.name,
-          access_token: fbToken,
+          access_token: page.access_token || fbToken,
           status: 'valid'
         })
       });
@@ -912,13 +913,19 @@ const Settings = () => {
   };
 
   const deleteFbPage = async (id: string) => {
-    // In a real app, we'd have a DELETE endpoint
-    // For now, we'll just filter it out locally or add a delete API
-    setFbPages(prev => prev.filter(p => p.id !== id));
+    try {
+      const res = await fetch(`/api/facebook-pages/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        fetchData();
+      }
+    } catch (err) {
+      console.error(err);
+    }
   };
 
   const menuItems = [
     { id: 'supabase', label: 'Supabase', icon: Database },
+    { id: 'blogger-oauth', label: 'Blogger OAuth Credentials', icon: KeyIcon },
     { id: 'github', label: 'GitHub', icon: Github },
     { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
     { id: 'facebook', label: 'Facebook', icon: Facebook },
@@ -967,7 +974,7 @@ const Settings = () => {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
             transition={{ duration: 0.2 }}
-            className="max-w-4xl mx-auto"
+            className="max-w-6xl mx-auto"
           >
             {error && (
               <motion.div 
@@ -1007,7 +1014,12 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS elevenlabs_keys JSONB DEFAULT '[]'
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS lightning_keys JSONB DEFAULT '[]';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_url TEXT;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_service_role_key TEXT;
-ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS blogger_client_id TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS blogger_client_secret TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS blogger_refresh_token TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_html TEXT;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     </pre>
                   </div>
                 )}
@@ -1030,7 +1042,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   </div>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="grid grid-cols-1 gap-8">
                     <div className="space-y-3">
                       <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Supabase URL</label>
@@ -1090,8 +1102,139 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                       Saving will verify the connection and store credentials in your database.
                     </p>
                   </div>
+
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
+                    {hasSupabaseSaved ? (
+                      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-3">
+                        <p className="text-white font-semibold break-all">{settings.supabase_url || 'URL not set'}</p>
+                        <p className="text-xs text-zinc-500 font-mono">Access token: {maskValue(settings.supabase_access_token)}</p>
+                        <p className="text-xs text-zinc-500 font-mono">Service role: {maskValue(settings.supabase_service_role_key)}</p>
+                        <div className="flex items-center justify-between">
+                          <span className={cn("text-[10px] uppercase tracking-widest font-bold", supabaseStatus === 'connected' ? 'text-emerald-500' : 'text-rose-400')}>
+                            {supabaseStatus === 'connected' ? 'Connected' : 'Not connected'}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => saveSection('supabase', { supabase_url: settings.supabase_url, supabase_access_token: settings.supabase_access_token, supabase_service_role_key: settings.supabase_service_role_key })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                            <button onClick={() => { deleteSettingField('supabase_url'); deleteSettingField('supabase_access_token'); deleteSettingField('supabase_service_role_key'); }} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No saved Supabase configuration yet.</div>
+                    )}
+                  </div>
                 </div>
               </div>
+            )}
+
+            {activeSubTab === 'blogger-oauth' && (
+              <div className="space-y-8">
+                <div>
+                  <h3 className="text-3xl font-bold text-white tracking-tight">Blogger OAuth Credentials</h3>
+                  <p className="text-zinc-400 mt-2 text-lg">Global OAuth credentials used for all Blogger connections and publishing.</p>
+                </div>
+
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
+                  <div className="space-y-3">
+                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Client ID</label>
+                    <div className="relative group">
+                      <KeyIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
+                      <input
+                        type="text"
+                        value={settings.blogger_client_id || ''}
+                        onChange={(e) => setSettings({ ...settings, blogger_client_id: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg"
+                        placeholder="Google OAuth Client ID"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Client Secret</label>
+                    <div className="relative group">
+                      <Shield className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
+                      <input
+                        type="password"
+                        value={settings.blogger_client_secret || ''}
+                        onChange={(e) => setSettings({ ...settings, blogger_client_secret: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg"
+                        placeholder="Google OAuth Client Secret"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Refresh Token</label>
+                    <div className="relative group">
+                      <RefreshCw className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
+                      <input
+                        type="password"
+                        value={settings.blogger_refresh_token || ''}
+                        onChange={(e) => setSettings({ ...settings, blogger_refresh_token: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg"
+                        placeholder="Blogger OAuth Refresh Token"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => saveSection('blogger-oauth', {
+                      blogger_client_id: settings.blogger_client_id,
+                      blogger_client_secret: settings.blogger_client_secret,
+                      blogger_refresh_token: settings.blogger_refresh_token
+                    })}
+                    disabled={saving === 'blogger-oauth'}
+                    className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-xl shadow-indigo-500/20 disabled:opacity-50 text-lg flex items-center justify-center gap-3"
+                  >
+                    {saving === 'blogger-oauth' ? <RefreshCw className="w-6 h-6 animate-spin" /> : <Save className="w-6 h-6" />}
+                    Save Blogger OAuth Credentials
+                  </button>
+
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
+                    {hasBloggerSaved ? (
+                    <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20">
+                      <p className="text-zinc-400 text-sm">Saved Blogger OAuth credentials.</p>
+
+                      <div className="flex items-center gap-3">
+                      <button
+                        onClick={async () => { const res = await fetch('/api/blogger/available-accounts'); if (!res.ok) { const payload = await res.json().catch(() => ({})); alert(payload.error || 'Unable to fetch Blogger accounts'); return; } const blogs = await res.json(); alert(`Fetched ${Array.isArray(blogs) ? blogs.length : 0} Blogger account(s). Open Blogger Accounts page to connect them.`); }}
+                        className="text-emerald-400 hover:text-emerald-300 text-sm font-bold"
+                      >
+                        Fetch Blogger Accounts
+                      </button>
+                      <button
+                        onClick={() => saveSection('blogger-oauth', {
+                          blogger_client_id: settings.blogger_client_id,
+                          blogger_client_secret: settings.blogger_client_secret,
+                          blogger_refresh_token: settings.blogger_refresh_token
+                        })}
+                        className="text-indigo-400 hover:text-indigo-300 text-sm font-bold"
+                      >
+                        Edit
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          deleteSettingField('blogger_client_id');
+                          deleteSettingField('blogger_client_secret');
+                          deleteSettingField('blogger_refresh_token');
+                        }}
+                        className="text-rose-400 hover:text-rose-300 text-sm font-bold"
+                      >
+                        Delete
+                      </button>
+
+                      </div>
+
+                    </div>
+                  ) : (
+                    <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No Blogger OAuth credentials saved yet.</div>
+                  )}
+                </div>
+              </div>
+            </div>
             )}
 
             {activeSubTab === 'github' && (
@@ -1101,7 +1244,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Connect your GitHub account for Actions and Remotion pipelines.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-3">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Personal Access Token (PAT)</label>
                     <div className="relative group">
@@ -1125,6 +1268,21 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                     {saving === 'github' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                     Save Token
                   </button>
+
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
+                    {hasGitHubSaved ? (
+                      <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20">
+                        <div>
+                          <p className="text-zinc-400 text-sm">Saved PAT: <span className="text-white font-mono">{maskValue(settings.github_pat)}</span></p>
+                          <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Connected</p>
+                        </div>
+                        <div className="flex items-center gap-3"><button onClick={() => saveSection('github', { github_pat: settings.github_pat })} className="text-indigo-400 hover:text-indigo-300 text-sm font-bold">Edit</button><button onClick={() => deleteSettingField('github_pat')} className="text-rose-400 hover:text-rose-300 text-sm font-bold">Delete</button></div>
+                      </div>
+                    ) : (
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No GitHub PAT saved yet.</div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -1136,7 +1294,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Add multiple Workers AI configurations for automatic rotation.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="space-y-2">
                       <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Account ID</label>
@@ -1162,7 +1320,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                       const accId = (document.getElementById('cf-account-id') as HTMLInputElement).value;
                       const apiKey = (document.getElementById('cf-api-key') as HTMLInputElement).value;
                       if (accId && apiKey) {
-                        const newConfigs = [...(settings.cloudflare_configs || []), { account_id: accId, api_key: apiKey, usage: 0 }];
+                        const newConfigs = [...(settings.cloudflare_configs || []), { account_id: accId, api_key: apiKey, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
                         saveSection('cloudflare', { cloudflare_configs: newConfigs });
                         (document.getElementById('cf-account-id') as HTMLInputElement).value = '';
                         (document.getElementById('cf-api-key') as HTMLInputElement).value = '';
@@ -1175,30 +1333,45 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   </button>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Active Configurations</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured Integrations</h4>
                     {settings.cloudflare_configs?.map((config: any, idx: number) => (
-                      <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between group hover:border-zinc-700 transition-colors">
+                      <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-zinc-700 transition-colors">
                         <div className="flex items-center gap-4">
                           <div className="w-10 h-10 bg-orange-500/10 rounded-xl flex items-center justify-center">
                             <Cloud className="text-orange-500 w-5 h-5" />
                           </div>
                           <div>
                             <p className="text-white font-medium font-mono text-sm">{config.account_id}</p>
+                            <p className="text-xs text-zinc-500 font-mono">API: {maskValue(config.api_key, 5, 3)}</p>
                             <div className="flex items-center gap-2 mt-1">
                               <BarChart3 className="w-3 h-3 text-zinc-500" />
-                              <span className="text-xs text-zinc-500">Usage: {config.usage || 0} requests</span>
+                              <span className="text-xs text-zinc-500">Success: {config.success_calls || 0} • Failed: {config.failed_calls || 0} • Total: {config.total_calls || 0} • Monthly: {config.monthly_calls || 0}</span>
+                              <span className={cn('text-[10px] uppercase tracking-widest font-bold ml-2', (config.failed_calls || 0) > (config.success_calls || 0) ? 'text-amber-400' : 'text-emerald-500')}>{(config.failed_calls || 0) > (config.success_calls || 0) ? 'Needs attention' : 'Active'}</span>
                             </div>
                           </div>
                         </div>
-                        <button 
-                          onClick={() => {
-                            const newConfigs = settings.cloudflare_configs.filter((_: any, i: number) => i !== idx);
-                            saveSection('cloudflare', { cloudflare_configs: newConfigs });
-                          }}
-                          className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
-                        >
-                          <Trash2 className="w-5 h-5" />
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => {
+                              const account_id = prompt('Cloudflare Account ID', config.account_id || '') || config.account_id;
+                              const api_key = prompt('Cloudflare API Key', config.api_key || '') || config.api_key;
+                              const newConfigs = settings.cloudflare_configs.map((c: any, i: number) => i === idx ? { ...c, account_id, api_key } : c);
+                              saveSection('cloudflare', { cloudflare_configs: newConfigs });
+                            }}
+                            className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
+                          >
+                            <Save className="w-5 h-5" />
+                          </button>
+                          <button 
+                            onClick={() => {
+                              const newConfigs = settings.cloudflare_configs.filter((_: any, i: number) => i !== idx);
+                              saveSection('cloudflare', { cloudflare_configs: newConfigs });
+                            }}
+                            className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
+                          >
+                            <Trash2 className="w-5 h-5" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                     {(!settings.cloudflare_configs || settings.cloudflare_configs.length === 0) && (
@@ -1218,7 +1391,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Connect and manage your Facebook Pages for automated posting.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-4">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Access Token</label>
                     <div className="flex flex-col sm:flex-row gap-4">
@@ -1249,13 +1422,14 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                       </h4>
                       <div className="grid grid-cols-1 gap-3">
                         {fetchedFbPages.map(page => (
-                          <div key={page.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between group hover:border-indigo-500/50 transition-all">
+                          <div key={page.id} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-indigo-500/50 transition-all">
                             <div className="flex items-center gap-4">
                               <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
                                 <Facebook className="text-indigo-500 w-5 h-5" />
                               </div>
                               <div>
                                 <p className="text-white font-bold">{page.name}</p>
+                              <p className="text-[11px] text-zinc-500 font-mono">Page ID: {page.page_id || page.id}</p>
                                 <p className="text-xs text-zinc-500">{page.category}</p>
                               </div>
                             </div>
@@ -1273,16 +1447,17 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   )}
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Connected Pages</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured Integrations</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {fbPages.map(page => (
-                        <div key={page.id} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 flex items-center justify-between group hover:border-zinc-700 transition-colors">
+                        <div key={page.id} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between group hover:border-zinc-700 transition-colors shadow-lg shadow-black/20">
                           <div className="flex items-center gap-4">
                             <div className="w-12 h-12 bg-blue-500/10 rounded-xl flex items-center justify-center">
                               <Facebook className="text-blue-500 w-6 h-6" />
                             </div>
                             <div>
                               <p className="text-white font-bold">{page.name}</p>
+                              <p className="text-[11px] text-zinc-500 font-mono">Page ID: {page.page_id || page.id}</p>
                               <div className="flex items-center gap-2 mt-1">
                                 <div className={cn("w-1.5 h-1.5 rounded-full", page.status === 'valid' ? "bg-emerald-500" : "bg-rose-500")} />
                                 <span className={cn(
@@ -1320,7 +1495,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Add multiple API keys for voice generation with automatic rotation.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-4">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">New API Key</label>
                     <div className="flex flex-col sm:flex-row gap-4">
@@ -1334,7 +1509,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                         onClick={() => {
                           const key = (document.getElementById('el-api-key') as HTMLInputElement).value;
                           if (key) {
-                            const newKeys = [...(settings.elevenlabs_keys || []), { key, usage: 0, requests: 0 }];
+                            const newKeys = [...(settings.elevenlabs_keys || []), { key, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
                             saveSection('elevenlabs', { elevenlabs_keys: newKeys });
                             (document.getElementById('el-api-key') as HTMLInputElement).value = '';
                           }
@@ -1347,37 +1522,49 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   </div>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Active API Keys</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured API Keys</h4>
                     <div className="space-y-3">
                       {settings.elevenlabs_keys?.map((item: any, idx: number) => (
-                        <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between group hover:border-zinc-700 transition-colors">
+                        <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-zinc-700 transition-colors">
                           <div className="flex items-center gap-4">
                             <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
                               <Mic className="text-indigo-500 w-5 h-5" />
                             </div>
                             <div>
-                              <p className="text-white font-medium font-mono text-xs">{item.key.slice(0, 8)}...{item.key.slice(-4)}</p>
+                              <p className="text-white font-medium font-mono text-xs">{maskValue(item.key, 8, 4)}</p>
                               <div className="flex items-center gap-4 mt-1">
                                 <div className="flex items-center gap-1.5">
                                   <BarChart3 className="w-3 h-3 text-zinc-500" />
-                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.requests || 0} Requests</span>
+                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.success_calls || 0} Success</span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
                                   <Database className="w-3 h-3 text-zinc-500" />
-                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.usage || 0} Chars</span>
+                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.failed_calls || 0} Failed • {item.total_calls || 0} Total • {item.monthly_calls || 0} Monthly</span>
                                 </div>
                               </div>
                             </div>
                           </div>
-                          <button 
-                            onClick={() => {
-                              const newKeys = settings.elevenlabs_keys.filter((_: any, i: number) => i !== idx);
-                              saveSection('elevenlabs', { elevenlabs_keys: newKeys });
-                            }}
-                            className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
-                          >
-                            <Trash2 className="w-5 h-5" />
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                const key = prompt('ElevenLabs API Key', item.key || '') || item.key;
+                                const newKeys = settings.elevenlabs_keys.map((k: any, i: number) => i === idx ? { ...k, key } : k);
+                                saveSection('elevenlabs', { elevenlabs_keys: newKeys });
+                              }}
+                              className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
+                            >
+                              <Save className="w-5 h-5" />
+                            </button>
+                            <button 
+                              onClick={() => {
+                                const newKeys = settings.elevenlabs_keys.filter((_: any, i: number) => i !== idx);
+                                saveSection('elevenlabs', { elevenlabs_keys: newKeys });
+                              }}
+                              className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
+                            >
+                              <Trash2 className="w-5 h-5" />
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1398,7 +1585,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Manage multiple API keys for high-performance video rendering.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-4">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">New API Key</label>
                     <div className="flex flex-col sm:flex-row gap-4">
@@ -1412,7 +1599,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                         onClick={() => {
                           const key = (document.getElementById('li-api-key') as HTMLInputElement).value;
                           if (key) {
-                            const newKeys = [...(settings.lightning_keys || []), { key, usage: 0, requests: 0 }];
+                            const newKeys = [...(settings.lightning_keys || []), { key, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
                             saveSection('lightning', { lightning_keys: newKeys });
                             (document.getElementById('li-api-key') as HTMLInputElement).value = '';
                           }
@@ -1425,33 +1612,45 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   </div>
 
                   <div className="space-y-4">
-                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Active API Keys</h4>
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured API Keys</h4>
                     <div className="space-y-3">
                       {settings.lightning_keys?.map((item: any, idx: number) => (
-                        <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between group hover:border-zinc-700 transition-colors">
+                        <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-zinc-700 transition-colors">
                           <div className="flex items-center gap-4">
                             <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
                               <Video className="text-indigo-500 w-5 h-5" />
                             </div>
                             <div>
-                              <p className="text-white font-medium font-mono text-xs">{item.key.slice(0, 8)}...{item.key.slice(-4)}</p>
+                              <p className="text-white font-medium font-mono text-xs">{maskValue(item.key, 8, 4)}</p>
                               <div className="flex items-center gap-4 mt-1">
                                 <div className="flex items-center gap-1.5">
                                   <BarChart3 className="w-3 h-3 text-zinc-500" />
-                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.requests || 0} Renders</span>
+                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.success_calls || 0} Success • {item.failed_calls || 0} Failed • {item.total_calls || 0} Total • {item.monthly_calls || 0} Monthly</span>
                                 </div>
                               </div>
                             </div>
                           </div>
-                          <button 
-                            onClick={() => {
-                              const newKeys = settings.lightning_keys.filter((_: any, i: number) => i !== idx);
-                              saveSection('lightning', { lightning_keys: newKeys });
-                            }}
-                            className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
-                          >
-                            <Trash2 className="w-5 h-5" />
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => {
+                                const key = prompt('Lightning.ai API Key', item.key || '') || item.key;
+                                const newKeys = settings.lightning_keys.map((k: any, i: number) => i === idx ? { ...k, key } : k);
+                                saveSection('lightning', { lightning_keys: newKeys });
+                              }}
+                              className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
+                            >
+                              <Save className="w-5 h-5" />
+                            </button>
+                            <button 
+                              onClick={() => {
+                                const newKeys = settings.lightning_keys.filter((_: any, i: number) => i !== idx);
+                                saveSection('lightning', { lightning_keys: newKeys });
+                              }}
+                              className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
+                            >
+                              <Trash2 className="w-5 h-5" />
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1472,7 +1671,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Configure your Catbox user hash for hosting blog images and videos.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-3">
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">User Hash</label>
                     <div className="relative group">
@@ -1496,6 +1695,25 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                     {saving === 'catbox' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                     Save Settings
                   </button>
+
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
+                    {hasCatboxSaved ? (
+                      <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20">
+                        <div>
+                          <p className="text-zinc-400 text-sm">Saved Catbox.moe</p>
+                          <p className="text-white font-mono text-xs">{maskValue(settings.catbox_hash)}</p>
+                          <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Configured</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => saveSection('catbox', { catbox_hash: settings.catbox_hash })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                          <button onClick={() => deleteSettingField('catbox_hash')} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No Catbox configuration saved yet.</div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -1507,7 +1725,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                   <p className="text-zinc-400 mt-2 text-lg">Configure advertisements to be automatically injected into your Blogger posts.</p>
                 </div>
 
-                <div className="bg-zinc-900 border border-zinc-800 rounded-[2.5rem] p-8 lg:p-10 shadow-2xl space-y-8">
+                <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-6">
                     <div className="space-y-3">
                       <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Ad Placement</label>
@@ -1570,6 +1788,24 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;`}
                     {saving === 'ads' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                     Save Ads Settings
                   </button>
+
+                  <div className="space-y-4">
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
+                    {hasAdsSaved ? (
+                      <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 space-y-3 shadow-lg shadow-black/20">
+                        <p className="text-zinc-400 text-sm">Saved Ads Configuration</p>
+                        <p className="text-xs text-zinc-500">Placement: <span className="text-white">{settings.ads_placement || 'after'}</span></p>
+                        <p className="text-xs text-zinc-500">HTML: <span className="text-white">{settings.ads_html ? `${settings.ads_html.length} chars` : 'Not set'}</span></p>
+                        <p className="text-xs text-zinc-500">Scripts: <span className="text-white">{settings.ads_scripts ? `${settings.ads_scripts.length} chars` : 'Not set'}</span></p>
+                        <div className="flex gap-2">
+                          <button onClick={() => saveSection('ads', { ads_html: settings.ads_html, ads_scripts: settings.ads_scripts, ads_placement: settings.ads_placement })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                          <button onClick={() => { deleteSettingField('ads_html'); deleteSettingField('ads_scripts'); deleteSettingField('ads_placement'); }} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No ads settings saved yet.</div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
