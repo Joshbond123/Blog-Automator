@@ -719,6 +719,17 @@ const Settings = () => {
   const [fetchingFb, setFetchingFb] = useState(false);
   const [supabaseStatus, setSupabaseStatus] = useState<'idle' | 'verifying' | 'connected' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const maskValue = (value?: string, start = 6, end = 4) => {
+    if (!value) return 'Not set';
+    if (value.length <= start + end) return '•'.repeat(Math.max(value.length, 8));
+    return `${value.slice(0, start)}...${value.slice(-end)}`;
+  };
+
+  const hasSupabaseSaved = Boolean(settings.supabase_url || settings.supabase_access_token || settings.supabase_service_role_key);
+  const hasBloggerSaved = Boolean(settings.blogger_client_id || settings.blogger_client_secret || settings.blogger_refresh_token);
+  const hasGitHubSaved = Boolean(settings.github_pat);
+  const hasCatboxSaved = Boolean(settings.catbox_hash);
+  const hasAdsSaved = Boolean(settings.ads_html || settings.ads_scripts || settings.ads_placement);
 
   useEffect(() => {
     fetchData();
@@ -1061,6 +1072,28 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       Saving will verify the connection and store credentials in your database.
                     </p>
                   </div>
+
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    {hasSupabaseSaved ? (
+                      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-5 space-y-3">
+                        <p className="text-white font-semibold break-all">{settings.supabase_url || 'URL not set'}</p>
+                        <p className="text-xs text-zinc-500 font-mono">Access token: {maskValue(settings.supabase_access_token)}</p>
+                        <p className="text-xs text-zinc-500 font-mono">Service role: {maskValue(settings.supabase_service_role_key)}</p>
+                        <div className="flex items-center justify-between">
+                          <span className={cn("text-[10px] uppercase tracking-widest font-bold", supabaseStatus === 'connected' ? 'text-emerald-500' : 'text-rose-400')}>
+                            {supabaseStatus === 'connected' ? 'Connected' : 'Not connected'}
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button onClick={() => saveSection('supabase', { supabase_url: settings.supabase_url, supabase_access_token: settings.supabase_access_token, supabase_service_role_key: settings.supabase_service_role_key })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                            <button onClick={() => { deleteSettingField('supabase_url'); deleteSettingField('supabase_access_token'); deleteSettingField('supabase_service_role_key'); }} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No saved Supabase configuration yet.</div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -1128,7 +1161,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     Save Blogger OAuth Credentials
                   </button>
 
-                  {(settings.blogger_client_id || settings.blogger_client_secret || settings.blogger_refresh_token) && (
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    {hasBloggerSaved ? (
                     <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
                       <p className="text-zinc-400 text-sm">Saved Blogger OAuth credentials.</p>
 
@@ -1164,9 +1199,12 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       </div>
 
                     </div>
+                  ) : (
+                    <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No Blogger OAuth credentials saved yet.</div>
                   )}
                 </div>
               </div>
+            </div>
             )}
 
             {activeSubTab === 'github' && (
@@ -1201,14 +1239,20 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     Save Token
                   </button>
 
-                  {settings.github_pat && (
-                    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
-                      <p className="text-zinc-400 text-sm">Saved PAT: <span className="text-white font-mono">{settings.github_pat.slice(0, 6)}...{settings.github_pat.slice(-4)}</span></p>
-
-                      <div className="flex items-center gap-3"><button onClick={() => saveSection('github', { github_pat: settings.github_pat })} className="text-indigo-400 hover:text-indigo-300 text-sm font-bold">Edit</button><button onClick={() => deleteSettingField('github_pat')} className="text-rose-400 hover:text-rose-300 text-sm font-bold">Delete</button></div>
-
-                    </div>
-                  )}
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    {hasGitHubSaved ? (
+                      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
+                        <div>
+                          <p className="text-zinc-400 text-sm">Saved PAT: <span className="text-white font-mono">{maskValue(settings.github_pat)}</span></p>
+                          <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Connected</p>
+                        </div>
+                        <div className="flex items-center gap-3"><button onClick={() => saveSection('github', { github_pat: settings.github_pat })} className="text-indigo-400 hover:text-indigo-300 text-sm font-bold">Edit</button><button onClick={() => deleteSettingField('github_pat')} className="text-rose-400 hover:text-rose-300 text-sm font-bold">Delete</button></div>
+                      </div>
+                    ) : (
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No GitHub PAT saved yet.</div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -1268,9 +1312,11 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                           </div>
                           <div>
                             <p className="text-white font-medium font-mono text-sm">{config.account_id}</p>
+                            <p className="text-xs text-zinc-500 font-mono">API: {maskValue(config.api_key, 5, 3)}</p>
                             <div className="flex items-center gap-2 mt-1">
                               <BarChart3 className="w-3 h-3 text-zinc-500" />
                               <span className="text-xs text-zinc-500">Success: {config.success_calls || 0} • Failed: {config.failed_calls || 0} • Total: {config.total_calls || 0} • Monthly: {config.monthly_calls || 0}</span>
+                              <span className={cn('text-[10px] uppercase tracking-widest font-bold ml-2', (config.failed_calls || 0) > (config.success_calls || 0) ? 'text-amber-400' : 'text-emerald-500')}>{(config.failed_calls || 0) > (config.success_calls || 0) ? 'Needs attention' : 'Active'}</span>
                             </div>
                           </div>
                         </div>
@@ -1455,7 +1501,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                               <Mic className="text-indigo-500 w-5 h-5" />
                             </div>
                             <div>
-                              <p className="text-white font-medium font-mono text-xs">{item.key.slice(0, 8)}...{item.key.slice(-4)}</p>
+                              <p className="text-white font-medium font-mono text-xs">{maskValue(item.key, 8, 4)}</p>
                               <div className="flex items-center gap-4 mt-1">
                                 <div className="flex items-center gap-1.5">
                                   <BarChart3 className="w-3 h-3 text-zinc-500" />
@@ -1545,7 +1591,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                               <Video className="text-indigo-500 w-5 h-5" />
                             </div>
                             <div>
-                              <p className="text-white font-medium font-mono text-xs">{item.key.slice(0, 8)}...{item.key.slice(-4)}</p>
+                              <p className="text-white font-medium font-mono text-xs">{maskValue(item.key, 8, 4)}</p>
                               <div className="flex items-center gap-4 mt-1">
                                 <div className="flex items-center gap-1.5">
                                   <BarChart3 className="w-3 h-3 text-zinc-500" />
@@ -1620,20 +1666,24 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     Save Settings
                   </button>
 
-                  {settings.catbox_hash && (
-                    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
-                      <div>
-                        <p className="text-zinc-400 text-sm">Saved Catbox.moe</p>
-                        <p className="text-white font-mono text-xs">{settings.catbox_hash}</p>
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    {hasCatboxSaved ? (
+                      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between">
+                        <div>
+                          <p className="text-zinc-400 text-sm">Saved Catbox.moe</p>
+                          <p className="text-white font-mono text-xs">{maskValue(settings.catbox_hash)}</p>
+                          <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Configured</p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button onClick={() => saveSection('catbox', { catbox_hash: settings.catbox_hash })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                          <button onClick={() => deleteSettingField('catbox_hash')} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                        </div>
                       </div>
-                      <div className="flex gap-2">
-
-                        <button onClick={() => saveSection('catbox', { catbox_hash: settings.catbox_hash })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
-
-                        <button onClick={() => deleteSettingField('catbox_hash')} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
-                      </div>
-                    </div>
-                  )}
+                    ) : (
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No Catbox configuration saved yet.</div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -1709,18 +1759,23 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     Save Ads Settings
                   </button>
 
-                  {(settings.ads_html || settings.ads_scripts) && (
-                    <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 space-y-3">
-                      <p className="text-zinc-400 text-sm">Saved Ads Configuration</p>
-                      <p className="text-xs text-zinc-500">Placement: <span className="text-white">{settings.ads_placement || 'after'}</span></p>
-                      <div className="flex gap-2">
-                        <button onClick={() => saveSection('ads', { ads_html: settings.ads_html, ads_scripts: settings.ads_scripts, ads_placement: settings.ads_placement })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
-
-                        <button onClick={() => { deleteSettingField('ads_html'); deleteSettingField('ads_scripts'); deleteSettingField('ads_placement'); }} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
-
+                  <div className="space-y-4">
+                    <h4 className="text-sm font-bold text-zinc-500 uppercase tracking-widest">Saved Credentials</h4>
+                    {hasAdsSaved ? (
+                      <div className="bg-zinc-950 border border-zinc-800 rounded-2xl p-4 space-y-3">
+                        <p className="text-zinc-400 text-sm">Saved Ads Configuration</p>
+                        <p className="text-xs text-zinc-500">Placement: <span className="text-white">{settings.ads_placement || 'after'}</span></p>
+                        <p className="text-xs text-zinc-500">HTML: <span className="text-white">{settings.ads_html ? `${settings.ads_html.length} chars` : 'Not set'}</span></p>
+                        <p className="text-xs text-zinc-500">Scripts: <span className="text-white">{settings.ads_scripts ? `${settings.ads_scripts.length} chars` : 'Not set'}</span></p>
+                        <div className="flex gap-2">
+                          <button onClick={() => saveSection('ads', { ads_html: settings.ads_html, ads_scripts: settings.ads_scripts, ads_placement: settings.ads_placement })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                          <button onClick={() => { deleteSettingField('ads_html'); deleteSettingField('ads_scripts'); deleteSettingField('ads_placement'); }} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    ) : (
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No ads settings saved yet.</div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
