@@ -68,9 +68,21 @@ function serializeStoredValue(key: string, value: any) {
   return String(value);
 }
 
-async function getSettings() {  const supabase = getSupabase();
-  const { data } = await supabase.from('settings').select('*').limit(1);
-  const settings = (data && data[0]) || {};
+async function getSettings() {
+  const supabase = getSupabase();
+  const keyValueMode = await isKeyValueSettingsSchema(supabase);
+  const settings: any = {};
+
+  if (keyValueMode) {
+    const { data } = await supabase.from('settings').select('setting_key,setting_value');
+    for (const row of data || []) {
+      if (!KEY_VALUE_SETTING_FIELDS.has(row.setting_key)) continue;
+      settings[row.setting_key] = parseStoredValue(row.setting_key, row.setting_value);
+    }
+  } else {
+    const { data } = await supabase.from('settings').select('*').limit(1);
+    Object.assign(settings, (data && data[0]) || {});
+  }
 
   if (!settings.cloudflare_configs && settings.cloudflare_api_keys && settings.cloudflare_account_id) {
     settings.cloudflare_configs = String(settings.cloudflare_api_keys)
