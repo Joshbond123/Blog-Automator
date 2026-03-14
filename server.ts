@@ -283,18 +283,37 @@ async function startServer() {
       const response = await fetch(`https://graph.facebook.com/v20.0/me/accounts?access_token=${encodeURIComponent(token)}`);
       const data = await response.json();
 
-      if (!response.ok || data.error) {
-        return res.status(400).json({ error: data.error?.message || "Failed to fetch Facebook pages" });
+      if (response.ok && !data.error) {
+        const pages = (data.data || []).map((page: any) => ({
+          id: page.id,
+          name: page.name,
+          category: page.category,
+          access_token: page.access_token,
+        }));
+
+        return res.json({ pages });
       }
 
-      const pages = (data.data || []).map((page: any) => ({
-        id: page.id,
-        name: page.name,
-        category: page.category,
-        access_token: page.access_token,
-      }));
+      // Fallback for page tokens / tokens that don't expose /me/accounts
+      const nonExistingAccountsField = data?.error?.code === 100 && /accounts/i.test(String(data?.error?.message || ""));
+      if (nonExistingAccountsField) {
+        const meResponse = await fetch(`https://graph.facebook.com/v20.0/me?fields=id,name,category&access_token=${encodeURIComponent(token)}`);
+        const meData = await meResponse.json();
+        if (!meResponse.ok || meData.error) {
+          return res.status(400).json({ error: meData.error?.message || data.error?.message || "Failed to fetch Facebook pages" });
+        }
 
-      res.json({ pages });
+        const pageLike = [{
+          id: meData.id,
+          name: meData.name || "Facebook Page",
+          category: meData.category,
+          access_token: token,
+        }];
+
+        return res.json({ pages: pageLike });
+      }
+
+      return res.status(400).json({ error: data.error?.message || "Failed to fetch Facebook pages" });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
