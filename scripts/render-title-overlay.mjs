@@ -46,6 +46,8 @@ async function main() {
   }
 
   const sourcePath = 'source-image';
+  const bgPath = 'background.png';
+  const fgPath = 'foreground.png';
   const gradientPath = 'gradient-overlay.png';
   const titleCardPath = 'title-card.png';
   const outputPath = 'final-overlay.png';
@@ -54,8 +56,32 @@ async function main() {
   await validateImageFile(sourcePath, 'source');
 
   await execFileAsync('convert', [
+    sourcePath,
+    '-resize', '1600x900^',
+    '-gravity', 'center',
+    '-extent', '1600x900',
+    '-blur', '0x12',
+    bgPath,
+  ], { maxBuffer: 20 * 1024 * 1024 });
+
+  await execFileAsync('convert', [
+    sourcePath,
+    '-resize', '1520x820',
+    fgPath,
+  ], { maxBuffer: 20 * 1024 * 1024 });
+
+  await execFileAsync('convert', [
+    bgPath,
+    fgPath,
+    '-gravity', 'center',
+    '-compose', 'over',
+    '-composite',
+    bgPath,
+  ], { maxBuffer: 20 * 1024 * 1024 });
+
+  await execFileAsync('convert', [
     '-size', '1600x900',
-    'gradient:rgba(0,0,0,0.05)-rgba(0,0,0,0.75)',
+    'gradient:rgba(0,0,0,0.05)-rgba(0,0,0,0.72)',
     gradientPath,
   ], { maxBuffer: 20 * 1024 * 1024 });
 
@@ -73,10 +99,7 @@ async function main() {
   ], { maxBuffer: 20 * 1024 * 1024 });
 
   await execFileAsync('convert', [
-    sourcePath,
-    '-resize', '1600x900^',
-    '-gravity', 'center',
-    '-extent', '1600x900',
+    bgPath,
     gradientPath,
     '-compose', 'over',
     '-composite',
