@@ -13,6 +13,12 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+          convert -version
+
       - name: Render title overlay and upload to Catbox
         env:
           SOURCE_IMAGE_URL: ${{ github.event.client_payload.sourceImageUrl }}
