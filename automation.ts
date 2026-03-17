@@ -6,6 +6,9 @@ import { decryptSecret } from './secrets';
 
 dotenv.config();
 
+const DEFAULT_CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+const DEFAULT_CF_IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+
 type KeyUsage = {
   key: string;
   success_calls?: number;
@@ -34,12 +37,49 @@ function normalizeUsageEntry(entry: any): KeyUsage {
   };
 }
 
+function normalizeCloudflareConfig(entry: any) {
+  const normalized = normalizeUsageEntry(entry || {}) as any;
+  return {
+    ...normalized,
+    account_id: normalized.account_id || normalized.accountId || normalized.accountID || normalized.account || normalized.cf_account_id || '',
+    api_key: normalized.api_key || normalized.apiKey || normalized.apiToken || normalized.api_token || normalized.token || normalized.key || '',
+  };
+}
+
+function extractCloudflareConfigsFromUnknownRow(rawValue: any): any[] {
+  const value = typeof rawValue === 'string' ? (() => {
+    try { return JSON.parse(rawValue); } catch { return rawValue; }
+  })() : rawValue;
+
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => normalizeCloudflareConfig(entry))
+      .filter((entry: any) => entry.account_id && entry.api_key);
+  }
+
+  if (value && typeof value === 'object') {
+    const direct = normalizeCloudflareConfig(value);
+    const nested = [
+      ...(Array.isArray((value as any).configs) ? (value as any).configs : []),
+      ...(Array.isArray((value as any).cloudflare_configs) ? (value as any).cloudflare_configs : []),
+      ...(Array.isArray((value as any).cloudflare?.configs) ? (value as any).cloudflare.configs : []),
+    ].map((entry: any) => normalizeCloudflareConfig(entry)).filter((entry: any) => entry.account_id && entry.api_key);
+
+    if (direct.account_id && direct.api_key) return [direct, ...nested];
+    return nested;
+  }
+
+  return [];
+}
+
 const ARRAY_SETTING_FIELDS = new Set(['cloudflare_configs', 'elevenlabs_keys', 'lightning_keys']);
 const KEY_VALUE_SETTING_FIELDS = new Set([
   'supabase_url', 'supabase_service_role_key', 'supabase_access_token', 'github_pat',
   'cloudflare_configs', 'blogger_client_id', 'blogger_client_secret', 'blogger_refresh_token',
   'elevenlabs_keys', 'lightning_keys', 'catbox_hash', 'ads_html', 'ads_scripts', 'ads_placement',
-  'cloudflare_rotation_index', 'elevenlabs_rotation_index', 'lightning_rotation_index'
+  'cloudflare_rotation_index', 'elevenlabs_rotation_index', 'lightning_rotation_index',
+  'cloudflare_text_model', 'cloudflare_image_model', 'global',
+  'cloudflare_account_id', 'cloudflare_api_token', 'cloudflare_api_keys'
 ]);
 
 async function isKeyValueSettingsSchema(supabase: any) {
@@ -79,17 +119,41 @@ async function getSettings() {
       if (!KEY_VALUE_SETTING_FIELDS.has(row.setting_key)) continue;
       settings[row.setting_key] = parseStoredValue(row.setting_key, row.setting_value);
     }
+
+    if ((!settings.cloudflare_configs || settings.cloudflare_configs.length === 0) && settings.global && typeof settings.global === 'object') {
+      const globalNode = settings.global as any;
+      if (Array.isArray(globalNode.cloudflare_configs)) settings.cloudflare_configs = globalNode.cloudflare_configs;
+      else if (globalNode.cloudflare && Array.isArray(globalNode.cloudflare.configs)) settings.cloudflare_configs = globalNode.cloudflare.configs;
+    }
+
+    if ((!settings.cloudflare_configs || settings.cloudflare_configs.length === 0) && Array.isArray(data)) {
+      const discovered = data.flatMap((row: any) => {
+        const key = String(row.setting_key || '').toLowerCase();
+        const parsed = extractCloudflareConfigsFromUnknownRow(row.setting_value);
+        if (parsed.length > 0 && (key.includes('cloudflare') || key === 'global' || key === 'integrations')) {
+          return parsed;
+        }
+        return [];
+      });
+      if (discovered.length > 0) {
+        settings.cloudflare_configs = discovered;
+      }
+    }
   } else {
     const { data } = await supabase.from('settings').select('*').limit(1);
     Object.assign(settings, (data && data[0]) || {});
   }
 
-  if (!settings.cloudflare_configs && settings.cloudflare_api_keys && settings.cloudflare_account_id) {
+  if ((!settings.cloudflare_configs || settings.cloudflare_configs.length === 0) && settings.cloudflare_api_keys && settings.cloudflare_account_id) {
     settings.cloudflare_configs = String(settings.cloudflare_api_keys)
       .split(',')
       .map((key: string) => key.trim())
       .filter(Boolean)
       .map((key: string) => ({ account_id: settings.cloudflare_account_id, key }));
+  }
+
+  if ((!settings.cloudflare_configs || settings.cloudflare_configs.length === 0) && settings.cloudflare_api_token && settings.cloudflare_account_id) {
+    settings.cloudflare_configs = [{ account_id: settings.cloudflare_account_id, api_key: settings.cloudflare_api_token }];
   }
 
   if (!Array.isArray(settings.cloudflare_configs)) settings.cloudflare_configs = [];
@@ -100,9 +164,14 @@ async function getSettings() {
   settings.elevenlabs_rotation_index = Number(settings.elevenlabs_rotation_index || 0);
   settings.lightning_rotation_index = Number(settings.lightning_rotation_index || 0);
 
-  settings.cloudflare_configs = settings.cloudflare_configs.map((c: any) => normalizeUsageEntry(c));
+  settings.cloudflare_configs = settings.cloudflare_configs
+    .map((c: any) => normalizeCloudflareConfig(c))
+    .filter((c: any) => c.account_id && c.api_key);
   settings.elevenlabs_keys = settings.elevenlabs_keys.map((k: any) => normalizeUsageEntry(k));
   settings.lightning_keys = settings.lightning_keys.map((k: any) => normalizeUsageEntry(k));
+
+  settings.cloudflare_text_model = settings.cloudflare_text_model || DEFAULT_CF_TEXT_MODEL;
+  settings.cloudflare_image_model = settings.cloudflare_image_model || DEFAULT_CF_IMAGE_MODEL;
 
   return settings;
 }
@@ -132,7 +201,7 @@ async function saveSettingsPatch(patch: Record<string, any>) {
 }
 
 function getEntryKey(entry: any) {
-  return entry?.key || entry?.api_key;
+  return entry?.key || entry?.api_key || entry?.apiKey || entry?.apiToken || entry?.api_token || entry?.token;
 }
 
 async function pickRotatingKey(
@@ -141,6 +210,9 @@ async function pickRotatingKey(
 ) {
   const settings = await getSettings();
   const list = (settings[listName] || []).filter((item: any) => getEntryKey(item));
+  if (listName === 'cloudflare_configs') {
+    console.log(`[automation] Loaded Cloudflare configs total=${(settings[listName] || []).length}, usable=${list.length}`);
+  }
   if (!list.length) throw new Error(`No keys configured for ${listName}`);
 
   const rawIndex = Number(settings[indexName] || 0);
@@ -199,10 +271,12 @@ async function uploadToCatbox(fileBuffer: Buffer, fileName: string) {
 
 async function generateText(prompt: string, niche: string) {
   const selected = await pickRotatingKey('cloudflare_configs', 'cloudflare_rotation_index');
+  const currentSettings = await getSettings();
+  const textModel = currentSettings.cloudflare_text_model || DEFAULT_CF_TEXT_MODEL;
 
   try {
     const res = await axios.post(
-      `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/@cf/meta/llama-3-8b-instruct`,
+      `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/${textModel}`,
       {
         messages: [
           { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
@@ -222,10 +296,12 @@ async function generateText(prompt: string, niche: string) {
 
 async function generateImage(prompt: string) {
   const selected = await pickRotatingKey('cloudflare_configs', 'cloudflare_rotation_index');
+  const currentSettings = await getSettings();
+  const imageModel = currentSettings.cloudflare_image_model || DEFAULT_CF_IMAGE_MODEL;
 
   try {
     const res = await axios.post(
-      `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/@cf/bytedance/stable-diffusion-xl-lightning`,
+      `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/${imageModel}`,
       { prompt },
       { headers: { Authorization: `Bearer ${selected.key}` }, responseType: 'arraybuffer' }
     );

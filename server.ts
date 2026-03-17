@@ -74,6 +74,32 @@ async function startServer() {
     return value;
   };
 
+  const normalizeCloudflareConfig = (entry: any = {}) => {
+    const accountId = entry?.account_id || entry?.accountId || entry?.accountID || entry?.account || entry?.cf_account_id;
+    const apiKey = entry?.api_key || entry?.apiKey || entry?.apiToken || entry?.api_token || entry?.token || entry?.key;
+    return { ...entry, account_id: accountId, api_key: apiKey };
+  };
+
+  const extractCloudflareConfigsFromUnknownValue = (raw: any) => {
+    const value = typeof raw === 'string' ? (() => {
+      try { return JSON.parse(raw); } catch { return raw; }
+    })() : raw;
+
+    const toConfigs = (items: any[]) => items
+      .map((item) => normalizeCloudflareConfig(item))
+      .filter((cfg: any) => cfg.account_id && cfg.api_key);
+
+    if (Array.isArray(value)) return toConfigs(value);
+    if (!value || typeof value !== 'object') return [];
+
+    return toConfigs([
+      value,
+      ...(Array.isArray((value as any).configs) ? (value as any).configs : []),
+      ...(Array.isArray((value as any).cloudflare_configs) ? (value as any).cloudflare_configs : []),
+      ...(Array.isArray((value as any).cloudflare?.configs) ? (value as any).cloudflare.configs : []),
+    ]);
+  };
+
   const serializeStoredValue = (key: string, value: any) => {
     if (value === undefined) return null;
     if (value === null) return null;
@@ -98,6 +124,44 @@ async function startServer() {
         if (!SETTINGS_FIELDS.has(key)) continue;
         mapped[key] = parseStoredValue(key, row.setting_value);
       }
+
+      if ((!mapped.cloudflare_configs || mapped.cloudflare_configs.length === 0) && Array.isArray(data)) {
+        const discovered = data.flatMap((row: any) => {
+          const key = String(row.setting_key || '').toLowerCase();
+          if (!(key.includes('cloudflare') || key === 'global' || key === 'integrations')) return [];
+          return extractCloudflareConfigsFromUnknownValue(row.setting_value);
+        });
+        if (discovered.length > 0) {
+          mapped.cloudflare_configs = discovered;
+        }
+      }
+
+      if ((!mapped.cloudflare_configs || mapped.cloudflare_configs.length === 0)) {
+        const { data: apiKeys } = await supabase
+          .from('api_keys')
+          .select('key_type, encrypted_key, metadata')
+          .ilike('key_type', '%cloudflare%');
+
+        const extracted = (apiKeys || []).flatMap((row: any) => {
+          const nested = extractCloudflareConfigsFromUnknownValue(row?.metadata);
+          let decrypted = '';
+          try {
+            decrypted = decryptSecret(row?.encrypted_key || '');
+          } catch {
+            decrypted = row?.encrypted_key || '';
+          }
+          const single = normalizeCloudflareConfig({
+            account_id: row?.metadata?.account_id || row?.metadata?.accountId || row?.metadata?.account,
+            api_key: decrypted,
+          });
+          return [...nested, ...(single.account_id && single.api_key ? [single] : [])];
+        });
+
+        if (extracted.length > 0) {
+          mapped.cloudflare_configs = extracted;
+        }
+      }
+
       return normalizeSettings(mapped);
     }
 
@@ -260,6 +324,47 @@ async function startServer() {
       res.json({ status: "connected" });
     } catch (err: any) {
       res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.post("/api/settings/verify-cloudflare", async (req, res) => {
+    const { account_id, api_key } = req.body || {};
+    const accountId = String(account_id || '').trim();
+    const apiKey = String(api_key || '').trim();
+
+    if (!accountId || !apiKey) {
+      return res.status(400).json({ error: "Cloudflare Account ID and API Key are required" });
+    }
+
+    try {
+      const response = await axios.post(
+        `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/@cf/meta/llama-3.3-70b-instruct-fp8-fast`,
+        {
+          messages: [
+            { role: 'system', content: 'Health check' },
+            { role: 'user', content: 'Respond with OK' }
+          ],
+          max_tokens: 8,
+        },
+        {
+          timeout: 15000,
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          validateStatus: () => true,
+        }
+      );
+
+      const payload = response.data || {};
+      if (response.status >= 200 && response.status < 300 && payload?.success !== false) {
+        return res.json({ status: 'valid' });
+      }
+
+      const message = payload?.errors?.[0]?.message || payload?.result?.error || `Cloudflare validation failed (${response.status})`;
+      return res.status(400).json({ error: message });
+    } catch (err: any) {
+      return res.status(400).json({ error: err?.message || 'Cloudflare validation failed' });
     }
   });
 

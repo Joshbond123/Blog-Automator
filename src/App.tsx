@@ -744,6 +744,9 @@ const Settings = () => {
   const [activeSubTab, setActiveSubTab] = useState('supabase');
   const [saving, setSaving] = useState<string | null>(null);
   const [fbToken, setFbToken] = useState('');
+  const [cfAccountId, setCfAccountId] = useState('');
+  const [cfApiKey, setCfApiKey] = useState('');
+  const [validatingCloudflare, setValidatingCloudflare] = useState(false);
   const [fetchedFbPages, setFetchedFbPages] = useState<any[]>([]);
   const [fetchingFb, setFetchingFb] = useState(false);
   const [supabaseStatus, setSupabaseStatus] = useState<'idle' | 'verifying' | 'connected' | 'error'>('idle');
@@ -890,6 +893,63 @@ const Settings = () => {
       }
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const verifyCloudflareCredentials = async (account_id: string, api_key: string) => {
+    const res = await fetch('/api/settings/verify-cloudflare', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ account_id, api_key })
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(payload.error || 'Cloudflare validation failed');
+    }
+    return payload;
+  };
+
+  const saveCloudflareConfigs = async (configs: any[]) => {
+    await saveSection('cloudflare', {
+      cloudflare_configs: configs,
+      cloudflare_text_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+      cloudflare_image_model: '@cf/black-forest-labs/flux-1-schnell'
+    });
+  };
+
+  const handleAddCloudflareConfig = async () => {
+    const account_id = cfAccountId.trim();
+    const api_key = cfApiKey.trim();
+    if (!account_id || !api_key) {
+      setError('Cloudflare Account ID and API Key are required.');
+      return;
+    }
+
+    try {
+      setValidatingCloudflare(true);
+      await verifyCloudflareCredentials(account_id, api_key);
+
+      const newConfigs = [
+        ...(settings.cloudflare_configs || []),
+        {
+          account_id,
+          api_key,
+          success_calls: 0,
+          failed_calls: 0,
+          total_calls: 0,
+          monthly_calls: 0,
+          monthly_period: new Date().toISOString().slice(0, 7),
+          active: true,
+        }
+      ];
+
+      await saveCloudflareConfigs(newConfigs);
+      setCfAccountId('');
+      setCfApiKey('');
+    } catch (err: any) {
+      setError(err.message || 'Unable to add Cloudflare configuration');
+    } finally {
+      setValidatingCloudflare(false);
     }
   };
 
@@ -1327,7 +1387,8 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Account ID</label>
                       <input 
                         type="text" 
-                        id="cf-account-id"
+                        value={cfAccountId}
+                        onChange={(e) => setCfAccountId(e.target.value)}
                         className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-all"
                         placeholder="Cloudflare Account ID"
                       />
@@ -1336,56 +1397,22 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">API Key</label>
                       <input 
                         type="password" 
-                        id="cf-api-key"
+                        value={cfApiKey}
+                        onChange={(e) => setCfApiKey(e.target.value)}
                         className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-all"
                         placeholder="Workers AI API Key"
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="space-y-2">
-                      <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Text Model</label>
-                      <input
-                        type="text"
-                        value={settings.cloudflare_text_model || ''}
-                        onChange={(e) => setSettings({ ...settings, cloudflare_text_model: e.target.value })}
-                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-all"
-                        placeholder="@cf/meta/llama-3.3-70b-instruct-fp8-fast"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Image Model</label>
-                      <input
-                        type="text"
-                        value={settings.cloudflare_image_model || ''}
-                        onChange={(e) => setSettings({ ...settings, cloudflare_image_model: e.target.value })}
-                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-all"
-                        placeholder="@cf/black-forest-labs/flux-1-schnell"
-                      />
-                    </div>
-                  </div>
-                  <button
-                    onClick={() => saveSection('cloudflare', { cloudflare_text_model: settings.cloudflare_text_model, cloudflare_image_model: settings.cloudflare_image_model })}
-                    className="w-full bg-indigo-600 text-white py-3 rounded-2xl font-bold hover:bg-indigo-500 transition-all"
-                  >
-                    Save Model Preferences
-                  </button>
                   <button 
-                    onClick={() => {
-                      const accId = (document.getElementById('cf-account-id') as HTMLInputElement).value;
-                      const apiKey = (document.getElementById('cf-api-key') as HTMLInputElement).value;
-                      if (accId && apiKey) {
-                        const newConfigs = [...(settings.cloudflare_configs || []), { account_id: accId, api_key: apiKey, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
-                        saveSection('cloudflare', { cloudflare_configs: newConfigs });
-                        (document.getElementById('cf-account-id') as HTMLInputElement).value = '';
-                        (document.getElementById('cf-api-key') as HTMLInputElement).value = '';
-                      }
-                    }}
+                    onClick={handleAddCloudflareConfig}
+                    disabled={validatingCloudflare || saving === 'cloudflare'}
                     className="w-full bg-zinc-800 text-white py-4 rounded-2xl font-bold hover:bg-zinc-700 transition-all border border-zinc-700 flex items-center justify-center gap-2"
                   >
-                    <Plus className="w-5 h-5" />
+                    {validatingCloudflare || saving === 'cloudflare' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
                     Add Configuration
                   </button>
+                  <p className="text-xs text-zinc-500">Default models are applied automatically: <span className="text-zinc-300 font-mono">@cf/meta/llama-3.3-70b-instruct-fp8-fast</span> and <span className="text-zinc-300 font-mono">@cf/black-forest-labs/flux-1-schnell</span>.</p>
 
                   <div className="space-y-4">
                     <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured Integrations</h4>
@@ -1407,24 +1434,32 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                         </div>
                         <div className="flex items-center gap-2">
                           <button
-                            onClick={() => {
+                            onClick={async () => {
                               const account_id = prompt('Cloudflare Account ID', config.account_id || '') || config.account_id;
                               const api_key = prompt('Cloudflare API Key', config.api_key || '') || config.api_key;
-                              const newConfigs = settings.cloudflare_configs.map((c: any, i: number) => i === idx ? { ...c, account_id, api_key } : c);
-                              saveSection('cloudflare', { cloudflare_configs: newConfigs });
+                              try {
+                                setValidatingCloudflare(true);
+                                await verifyCloudflareCredentials(account_id, api_key);
+                                const newConfigs = settings.cloudflare_configs.map((c: any, i: number) => i === idx ? { ...c, account_id, api_key, active: true } : c);
+                                await saveCloudflareConfigs(newConfigs);
+                              } catch (err: any) {
+                                setError(err.message || 'Cloudflare validation failed');
+                              } finally {
+                                setValidatingCloudflare(false);
+                              }
                             }}
-                            className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
+                            className="px-3 py-1 rounded-lg bg-indigo-600/15 text-indigo-300 hover:bg-indigo-600/25 transition-colors text-xs font-bold"
                           >
-                            <Save className="w-5 h-5" />
+                            Edit
                           </button>
                           <button 
-                            onClick={() => {
+                            onClick={async () => {
                               const newConfigs = settings.cloudflare_configs.filter((_: any, i: number) => i !== idx);
-                              saveSection('cloudflare', { cloudflare_configs: newConfigs });
+                              await saveCloudflareConfigs(newConfigs);
                             }}
-                            className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
+                            className="px-3 py-1 rounded-lg bg-rose-600/15 text-rose-300 hover:bg-rose-600/25 transition-colors text-xs font-bold"
                           >
-                            <Trash2 className="w-5 h-5" />
+                            Delete
                           </button>
                         </div>
                       </div>
