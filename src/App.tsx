@@ -735,7 +735,9 @@ const Settings = () => {
     cloudflare_configs: [],
     elevenlabs_keys: [],
     lightning_keys: [],
-    ads_placement: 'after'
+    ads_placement: 'after',
+    cloudflare_text_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
+    cloudflare_image_model: '@cf/black-forest-labs/flux-1-schnell'
   });
   const [fbPages, setFbPages] = useState<FacebookPage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1340,6 +1342,34 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                       />
                     </div>
                   </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Text Model</label>
+                      <input
+                        type="text"
+                        value={settings.cloudflare_text_model || ''}
+                        onChange={(e) => setSettings({ ...settings, cloudflare_text_model: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-all"
+                        placeholder="@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Image Model</label>
+                      <input
+                        type="text"
+                        value={settings.cloudflare_image_model || ''}
+                        onChange={(e) => setSettings({ ...settings, cloudflare_image_model: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-all"
+                        placeholder="@cf/black-forest-labs/flux-1-schnell"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => saveSection('cloudflare', { cloudflare_text_model: settings.cloudflare_text_model, cloudflare_image_model: settings.cloudflare_image_model })}
+                    className="w-full bg-indigo-600 text-white py-3 rounded-2xl font-bold hover:bg-indigo-500 transition-all"
+                  >
+                    Save Model Preferences
+                  </button>
                   <button 
                     onClick={() => {
                       const accId = (document.getElementById('cf-account-id') as HTMLInputElement).value;
