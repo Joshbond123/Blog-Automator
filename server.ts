@@ -8,7 +8,6 @@ import { createVerifiedSupabaseClient, getSupabase, updateSupabaseConfig, getPub
 import { runBlogAutomation, runVideoAutomation } from "./automation";
 import { decryptSecret, encryptSecret } from "./secrets";
 import axios from "axios";
-import { fetch as undiciFetch, ProxyAgent } from "undici";
 
 dotenv.config();
 
@@ -21,35 +20,11 @@ async function startServer() {
   const PORT = Number(process.env.PORT || 3000);
 
   const SECRET_SETTING_FIELDS = ["blogger_client_id", "blogger_client_secret", "blogger_refresh_token"] as const;
-
-  const outboundProxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || process.env.https_proxy || process.env.http_proxy;
-  const outboundProxyAgent = outboundProxyUrl ? new ProxyAgent(outboundProxyUrl) : null;
-
-  const proxyFetch = (url: string, init: any = {}) => {
-    if (outboundProxyAgent) {
-      return undiciFetch(url, { ...init, dispatcher: outboundProxyAgent } as any);
-    }
-    return undiciFetch(url, init as any);
-  };
-
-  const graphGet = async (path: string, params: Record<string, string>) => {
-    const query = new URLSearchParams(params).toString();
-    const response = await proxyFetch(`https://graph.facebook.com/v20.0/${path}?${query}`);
-    const text = await response.text();
-    const payload = text ? JSON.parse(text) : {};
-    if (!response.ok || payload?.error) {
-      const err: any = new Error(payload?.error?.message || `Facebook Graph request failed (${response.status})`);
-      err.facebookError = payload?.error;
-      throw err;
-    }
-    return payload;
-  };
-
   const ARRAY_SETTING_FIELDS = new Set(["cloudflare_configs", "elevenlabs_keys", "lightning_keys"]);
   const SETTINGS_FIELDS = new Set([
     "supabase_url", "supabase_service_role_key", "supabase_access_token", "github_pat",
     "cloudflare_configs", "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
-    "elevenlabs_keys", "lightning_keys", "catbox_hash", "ads_html", "ads_scripts", "ads_placement", "cloudflare_text_model", "cloudflare_image_model", "github_repo"
+    "elevenlabs_keys", "lightning_keys", "catbox_hash", "ads_html", "ads_scripts", "ads_placement"
   ]);
 
   const ensureArray = (value: any) => {
@@ -65,52 +40,12 @@ async function startServer() {
     return [];
   };
 
-
-  const isLikelyCloudflareAccountId = (value: any) => typeof value === 'string' && /^[a-f0-9]{32}$/i.test(value.trim());
-  const isLikelyCloudflareApiToken = (value: any) => typeof value === 'string' && value.trim().length > 24 && /[-_]/.test(value);
-
-  const normalizeCloudflareConfig = (entry: any = {}) => {
-    const accountId = entry?.account_id;
-    const apiKey = entry?.api_key || entry?.key;
-
-    if (isLikelyCloudflareAccountId(apiKey) && isLikelyCloudflareApiToken(accountId)) {
-      return { ...entry, account_id: apiKey, api_key: accountId };
-    }
-
-    return { ...entry, account_id: accountId, api_key: apiKey };
-  };
-
-  const classifyFacebookTokenError = (error: any) => {
-    const code = Number(error?.code || 0);
-    if (code === 190) return 'expired';
-    if (code === 10 || code === 200 || code === 2500) return 'invalid';
-    return 'error';
-  };
-
-  const verifyFacebookPageToken = async (pageId: string, token: string) => {
-    try {
-      const payload = await graphGet(encodeURIComponent(pageId), { fields: 'id,name', access_token: token });
-      return { status: 'valid', page_id: payload.id || pageId, name: payload.name || null, token_error: null };
-    } catch (error: any) {
-      const fbError = error?.facebookError;
-      const status = classifyFacebookTokenError(fbError);
-      return {
-        status,
-        page_id: pageId,
-        name: null,
-        token_error: fbError?.message || error?.message || 'Failed to verify token',
-      };
-    }
-  };
-
   const normalizeSettings = (settings: any = {}) => {
     const normalized = { ...settings };
-    normalized.cloudflare_configs = ensureArray(normalized.cloudflare_configs).map(normalizeCloudflareConfig);
+    normalized.cloudflare_configs = ensureArray(normalized.cloudflare_configs);
     normalized.elevenlabs_keys = ensureArray(normalized.elevenlabs_keys);
     normalized.lightning_keys = ensureArray(normalized.lightning_keys);
     normalized.ads_placement = normalized.ads_placement || 'after';
-    normalized.cloudflare_text_model = normalized.cloudflare_text_model || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-    normalized.cloudflare_image_model = normalized.cloudflare_image_model || '@cf/black-forest-labs/flux-1-schnell';
 
     if (normalized.cloudflare_configs.length === 0 && normalized.cloudflare_api_keys && normalized.cloudflare_account_id) {
       const oldKeys = String(normalized.cloudflare_api_keys).split(',').map((v: string) => v.trim()).filter(Boolean);
@@ -215,36 +150,6 @@ async function startServer() {
     const resetValue = field === "ads_placement" ? "after" : null;
     return writeSettings(supabase, { [field]: resetValue });
   };
-
-
-  const isLegacyScheduleSchema = async (supabase: any) => {
-    const { error } = await supabase.from("schedules").select("type,posting_time,active").limit(1);
-    return !error;
-  };
-
-  const normalizeSchedule = (row: any, legacy: boolean) => {
-    if (legacy) {
-      return {
-        ...row,
-        type: row.type || 'blog',
-        posting_time: row.posting_time,
-        active: row.active ?? true,
-      };
-    }
-
-    const metadata = row.metadata || {};
-    const rawTime = String(row.schedule_time || '').slice(0, 5);
-    return {
-      ...row,
-      type: row.channel === 'video' ? 'video' : 'blog',
-      posting_time: rawTime,
-      active: row.is_enabled ?? true,
-      last_execution_status: metadata.last_execution_status || null,
-      last_executed_at: metadata.last_executed_at || null,
-    };
-  };
-
-  const scheduleTypeOf = (row: any) => (row?.type === 'video' || row?.channel === 'video' ? 'video' : 'blog');
 
   app.use(express.json());
   console.log("Express middleware configured.");
@@ -359,27 +264,14 @@ async function startServer() {
   });
 
   app.post("/api/facebook/verify-token", async (req, res) => {
-    const { token, page_id } = req.body || {};
-    if (!token) return res.status(400).json({ error: "Token is required" });
-
+    const { token } = req.body;
     try {
-      if (page_id) {
-        const verified = await verifyFacebookPageToken(page_id, token);
-        return res.json(verified);
-      }
-
-      try {
-        const data: any = await graphGet('me', { fields: 'id,name', access_token: token });
-        return res.json({ status: 'valid', id: data.id, name: data.name });
-      } catch (error: any) {
-        const fbError = error?.facebookError;
-        return res.status(400).json({
-          status: classifyFacebookTokenError(fbError),
-          error: fbError?.message || 'Invalid Facebook token',
-        });
-      }
+      // In a real app, call FB Graph API
+      // For demo, we'll just return success if token is not empty
+      if (!token) throw new Error("Token is required");
+      res.json({ status: "valid" });
     } catch (err: any) {
-      res.status(500).json({ status: 'error', error: err.message });
+      res.status(400).json({ error: err.message });
     }
   });
 
@@ -388,29 +280,42 @@ async function startServer() {
     if (!token) return res.status(400).json({ error: "Token is required" });
 
     try {
-      const data: any = await graphGet('me/accounts', { access_token: token });
+      const response = await fetch(`https://graph.facebook.com/v20.0/me/accounts?access_token=${encodeURIComponent(token)}`);
+      const data = await response.json();
 
-      const pages = (data.data || []).map((page: any) => ({
-        id: page.id,
-        name: page.name,
-        category: page.category,
-        access_token: page.access_token,
-      }));
+      if (response.ok && !data.error) {
+        const pages = (data.data || []).map((page: any) => ({
+          id: page.id,
+          name: page.name,
+          category: page.category,
+          access_token: page.access_token,
+        }));
 
-      return res.json({ pages });
-    } catch (err: any) {
-      const fbError = err?.facebookError;
-      const nonExistingAccountsField = fbError?.code === 100 && /accounts/i.test(String(fbError?.message || ""));
-      if (nonExistingAccountsField) {
-        try {
-          const meData: any = await graphGet('me', { fields: 'id,name,category', access_token: token });
-          return res.json({ pages: [{ id: meData.id, name: meData.name || 'Facebook Page', category: meData.category, access_token: token }] });
-        } catch (innerErr: any) {
-          return res.status(400).json({ error: innerErr?.facebookError?.message || fbError?.message || 'Failed to fetch Facebook pages' });
-        }
+        return res.json({ pages });
       }
 
-      return res.status(400).json({ error: fbError?.message || err?.message || 'Failed to fetch Facebook pages' });
+      // Fallback for page tokens / tokens that don't expose /me/accounts
+      const nonExistingAccountsField = data?.error?.code === 100 && /accounts/i.test(String(data?.error?.message || ""));
+      if (nonExistingAccountsField) {
+        const meResponse = await fetch(`https://graph.facebook.com/v20.0/me?fields=id,name,category&access_token=${encodeURIComponent(token)}`);
+        const meData = await meResponse.json();
+        if (!meResponse.ok || meData.error) {
+          return res.status(400).json({ error: meData.error?.message || data.error?.message || "Failed to fetch Facebook pages" });
+        }
+
+        const pageLike = [{
+          id: meData.id,
+          name: meData.name || "Facebook Page",
+          category: meData.category,
+          access_token: token,
+        }];
+
+        return res.json({ pages: pageLike });
+      }
+
+      return res.status(400).json({ error: data.error?.message || "Failed to fetch Facebook pages" });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
@@ -425,32 +330,19 @@ async function startServer() {
         return res.status(400).json({ error: "Blogger OAuth credentials are not configured" });
       }
 
-      const tokenForm = new URLSearchParams({
+      const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
         client_id: settings.blogger_client_id,
         client_secret: settings.blogger_client_secret,
         refresh_token: settings.blogger_refresh_token,
         grant_type: "refresh_token",
       });
 
-      const tokenResponse = await proxyFetch("https://oauth2.googleapis.com/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: tokenForm.toString(),
+      const accessToken = tokenRes.data.access_token;
+      const blogsRes = await axios.get("https://www.googleapis.com/blogger/v3/users/self/blogs", {
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
-      const tokenPayload: any = await tokenResponse.json();
-      if (!tokenResponse.ok || tokenPayload?.error) {
-        throw new Error(tokenPayload?.error_description || tokenPayload?.error || `Blogger OAuth failed (${tokenResponse.status})`);
-      }
 
-      const blogsResponse = await proxyFetch("https://www.googleapis.com/blogger/v3/users/self/blogs", {
-        headers: { Authorization: `Bearer ${tokenPayload.access_token}` },
-      });
-      const blogsPayload: any = await blogsResponse.json();
-      if (!blogsResponse.ok || blogsPayload?.error) {
-        throw new Error(blogsPayload?.error?.message || blogsPayload?.error || `Failed to fetch Blogger accounts (${blogsResponse.status})`);
-      }
-
-      const blogs = (blogsPayload.items || []).map((item: any) => ({
+      const blogs = (blogsRes.data.items || []).map((item: any) => ({
         blogger_id: item.id,
         name: item.name,
         url: item.url,
@@ -491,22 +383,7 @@ async function startServer() {
       const supabase = getSupabase();
       const { data, error } = await supabase.from("facebook_pages").select("*");
       if (error) return res.status(500).json({ error: error.message });
-
-      const refreshStatus = String(req.query.refresh || "1") !== "0";
-      if (!refreshStatus || !(data || []).length) {
-        return res.json(data || []);
-      }
-
-      const verified = await Promise.all((data || []).map(async (page: any) => {
-        const result = await verifyFacebookPageToken(page.page_id, page.access_token);
-        return { ...page, status: result.status, name: result.name || page.name };
-      }));
-
-      await Promise.all(verified.map((page: any) =>
-        supabase.from("facebook_pages").update({ status: page.status, name: page.name }).eq("id", page.id)
-      ));
-
-      res.json(verified);
+      res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -515,13 +392,7 @@ async function startServer() {
   app.post("/api/facebook-pages", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const verified = await verifyFacebookPageToken(req.body.page_id, req.body.access_token);
-      const payload = {
-        ...req.body,
-        status: verified.status,
-        name: verified.name || req.body.name,
-      };
-      const { data, error } = await supabase.from("facebook_pages").insert(payload).select().single();
+      const { data, error } = await supabase.from("facebook_pages").insert(req.body).select().single();
       if (error) return res.status(500).json({ error: error.message });
       res.json(data);
     } catch (err: any) {
@@ -566,10 +437,9 @@ async function startServer() {
   app.get("/api/schedules", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const legacy = await isLegacyScheduleSchema(supabase);
       const { data, error } = await supabase.from("schedules").select("*");
       if (error) return res.status(500).json({ error: error.message });
-      res.json((data || []).map((row: any) => normalizeSchedule(row, legacy)));
+      res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -578,29 +448,9 @@ async function startServer() {
   app.post("/api/schedules", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const legacy = await isLegacyScheduleSchema(supabase);
-      const body = req.body || {};
-      const type = body.type === 'video' ? 'video' : 'blog';
-
-      const payload = legacy
-        ? {
-            type,
-            target_id: body.target_id,
-            posting_time: body.posting_time,
-            active: body.active ?? true,
-          }
-        : {
-            channel: type === 'video' ? 'video' : 'blog',
-            target_id: String(body.target_id || ''),
-            schedule_time: body.posting_time ? `${body.posting_time}:00` : null,
-            timezone: body.timezone || 'UTC',
-            is_enabled: body.active ?? true,
-            metadata: body.metadata || {},
-          };
-
-      const { data, error } = await supabase.from("schedules").insert(payload).select().single();
+      const { data, error } = await supabase.from("schedules").insert(req.body).select().single();
       if (error) return res.status(500).json({ error: error.message });
-      res.json(normalizeSchedule(data, legacy));
+      res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -610,27 +460,16 @@ async function startServer() {
   app.patch("/api/schedules/:id", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const legacy = await isLegacyScheduleSchema(supabase);
-      const body = req.body || {};
-
-      const payload = legacy
-        ? {
-            posting_time: body.posting_time,
-            target_id: body.target_id,
-            active: body.active,
-            type: body.type,
-          }
-        : {
-            schedule_time: body.posting_time ? `${body.posting_time}:00` : undefined,
-            target_id: body.target_id ? String(body.target_id) : undefined,
-            is_enabled: body.active,
-            channel: body.type ? (body.type === 'video' ? 'video' : 'blog') : undefined,
-          };
-      Object.keys(payload).forEach((k) => (payload as any)[k] === undefined && delete (payload as any)[k]);
+      const payload = {
+        posting_time: req.body?.posting_time,
+        target_id: req.body?.target_id,
+        active: req.body?.active,
+      } as any;
+      Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
 
       const { data, error } = await supabase.from("schedules").update(payload).eq("id", req.params.id).select().single();
       if (error) return res.status(500).json({ error: error.message });
-      res.json(normalizeSchedule(data, legacy));
+      res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -656,7 +495,7 @@ async function startServer() {
       
       if (!schedule) return res.status(404).json({ error: "Schedule not found" });
 
-      if (scheduleTypeOf(schedule) === "blog") {
+      if (schedule.type === "blog") {
         runBlogAutomation(id).catch(console.error);
       } else {
         runVideoAutomation(id).catch(console.error);
@@ -675,11 +514,7 @@ async function startServer() {
       const { count: totalPosts } = await supabase.from("posts").select("*", { count: "exact", head: true });
       const today = new Date().toISOString().split("T")[0];
       const { count: publishedToday } = await supabase.from("posts").select("*", { count: "exact", head: true }).gte("published_at", today);
-      const legacyScheduleSchema = await isLegacyScheduleSchema(supabase);
-      const activeSchedulesQuery = legacyScheduleSchema
-        ? supabase.from("schedules").select("*", { count: "exact", head: true }).eq("active", true)
-        : supabase.from("schedules").select("*", { count: "exact", head: true }).eq("is_enabled", true);
-      const { count: activeSchedules } = await activeSchedulesQuery;
+      const { count: activeSchedules } = await supabase.from("schedules").select("*", { count: "exact", head: true }).eq("active", true);
 
       res.json({
         totalPosts: totalPosts || 0,
@@ -726,16 +561,16 @@ async function startServer() {
       const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
       
       const supabase = getSupabase();
-      const legacy = await isLegacyScheduleSchema(supabase);
-      const schedulesQuery = legacy
-        ? supabase.from("schedules").select("*").eq("active", true).eq("posting_time", currentTime)
-        : supabase.from("schedules").select("*").eq("is_enabled", true).eq("schedule_time", `${currentTime}:00`);
-      const { data: schedules } = await schedulesQuery;
+      const { data: schedules } = await supabase
+        .from("schedules")
+        .select("*")
+        .eq("active", true)
+        .eq("posting_time", currentTime);
 
       if (schedules) {
         for (const schedule of schedules) {
           console.log(`Triggering schedule ${schedule.id} at ${currentTime}`);
-          if (scheduleTypeOf(schedule) === "blog") {
+          if (schedule.type === "blog") {
             runBlogAutomation(schedule.id).catch(console.error);
           } else {
             runVideoAutomation(schedule.id).catch(console.error);

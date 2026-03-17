@@ -18,9 +18,6 @@ create table if not exists settings (
   ads_html text,
   ads_scripts text,
   ads_placement text default 'after',
-  cloudflare_text_model text,
-  cloudflare_image_model text,
-  github_repo text,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
@@ -98,7 +95,3 @@ alter table settings add column if not exists ads_placement text default 'after'
 
 alter table schedules add column if not exists last_execution_status text;
 alter table schedules add column if not exists last_executed_at timestamptz;
-
-alter table settings add column if not exists cloudflare_text_model text;
-alter table settings add column if not exists cloudflare_image_model text;
-alter table settings add column if not exists github_repo text;
