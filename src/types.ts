@@ -33,6 +33,8 @@ export interface BloggerAccount {
   status: 'connected' | 'disconnected';
   facebook_page_id?: string;
   created_at: string;
+  last_execution_status?: string;
+  last_executed_at?: string;
 }
 
 export interface FacebookPage {
@@ -42,6 +44,8 @@ export interface FacebookPage {
   access_token: string;
   status: 'valid' | 'expired' | 'invalid';
   created_at: string;
+  last_execution_status?: string;
+  last_executed_at?: string;
 }
 
 export interface Schedule {
@@ -51,6 +55,8 @@ export interface Schedule {
   posting_time: string; // HH:mm
   active: boolean;
   created_at: string;
+  last_execution_status?: string;
+  last_executed_at?: string;
 }
 
 export interface Post {
