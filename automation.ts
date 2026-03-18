@@ -3,11 +3,20 @@ import FormData from 'form-data';
 import { getSupabase } from './supabase-backend';
 import dotenv from 'dotenv';
 import { decryptSecret } from './secrets';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 dotenv.config();
 
-const DEFAULT_CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-const DEFAULT_CF_IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+const LOCKED_CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+const LOCKED_CF_IMAGE_MODEL = '@cf/black-forest-labs/flux-2-dev';
+const CF_TEXT_TIMEOUT_MS = 90_000;
+const CF_IMAGE_TIMEOUT_MS = 240_000;
+const CF_MAX_RETRIES = 6;
+const execFileAsync = promisify(execFile);
 
 type KeyUsage = {
   key: string;
@@ -170,8 +179,8 @@ async function getSettings() {
   settings.elevenlabs_keys = settings.elevenlabs_keys.map((k: any) => normalizeUsageEntry(k));
   settings.lightning_keys = settings.lightning_keys.map((k: any) => normalizeUsageEntry(k));
 
-  settings.cloudflare_text_model = settings.cloudflare_text_model || DEFAULT_CF_TEXT_MODEL;
-  settings.cloudflare_image_model = settings.cloudflare_image_model || DEFAULT_CF_IMAGE_MODEL;
+  settings.cloudflare_text_model = settings.cloudflare_text_model || LOCKED_CF_TEXT_MODEL;
+  settings.cloudflare_image_model = settings.cloudflare_image_model || LOCKED_CF_IMAGE_MODEL;
 
   return settings;
 }
@@ -202,6 +211,127 @@ async function saveSettingsPatch(patch: Record<string, any>) {
 
 function getEntryKey(entry: any) {
   return entry?.key || entry?.api_key || entry?.apiKey || entry?.apiToken || entry?.api_token || entry?.token;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetriableCloudflareError(error: any) {
+  const status = Number(error?.response?.status || 0);
+  if ([408, 409, 425, 429, 500, 502, 503, 504].includes(status)) return true;
+  const code = String(error?.code || '').toUpperCase();
+  if (['ECONNRESET', 'ECONNABORTED', 'ETIMEDOUT', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT'].includes(code)) return true;
+  const msg = String(error?.message || '').toLowerCase();
+  if (msg.includes('upstream connect error') || msg.includes('connection timeout') || msg.includes('operation timed out')) return true;
+  return false;
+}
+
+async function runCloudflareWithRetry(
+  accountId: string,
+  apiKey: string,
+  model: string,
+  payload: any,
+  mode: 'text' | 'image',
+) {
+  const timeout = mode === 'image' ? CF_IMAGE_TIMEOUT_MS : CF_TEXT_TIMEOUT_MS;
+  let lastError: any;
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`;
+  const payloadText = JSON.stringify(payload || {});
+
+  for (let attempt = 1; attempt <= CF_MAX_RETRIES; attempt += 1) {
+    try {
+      console.log(`[automation] Cloudflare ${mode} attempt ${attempt}/${CF_MAX_RETRIES} model=${model}`);
+      const baseArgs = [
+        '-sS',
+        '--max-time',
+        String(Math.ceil(timeout / 1000)),
+        '-X',
+        'POST',
+        endpoint,
+        '-H',
+        `Authorization: Bearer ${apiKey}`,
+      ];
+
+      const requestArgs = mode === 'image'
+        ? [
+            ...baseArgs,
+            '-F',
+            `prompt=${String(payload?.prompt || '')}`,
+            '-F',
+            'width=1280',
+            '-F',
+            'height=720',
+            '-w',
+            '\n__HTTP_STATUS__:%{http_code}',
+          ]
+        : [
+            ...baseArgs,
+            '-H',
+            'Content-Type: application/json',
+            '--data-raw',
+            payloadText,
+            '-w',
+            '\n__HTTP_STATUS__:%{http_code}',
+          ];
+
+      const { stdout } = await execFileAsync('curl', requestArgs, { maxBuffer: 40 * 1024 * 1024 });
+
+      const output = String(stdout || '');
+      const marker = '\n__HTTP_STATUS__:';
+      const markerIndex = output.lastIndexOf(marker);
+      const body = markerIndex >= 0 ? output.slice(0, markerIndex) : output;
+      const statusText = markerIndex >= 0 ? output.slice(markerIndex + marker.length).trim() : '000';
+      const status = Number(statusText || 0);
+
+      if (status >= 200 && status < 300) {
+        return { status, data: body };
+      }
+
+      const bodyText = body.slice(0, 400);
+      const err: any = new Error(`Cloudflare ${mode} request failed (${status}): ${bodyText}`);
+      err.response = { status, data: bodyText };
+      throw err;
+    } catch (error: any) {
+      lastError = error;
+      if (!isRetriableCloudflareError(error) || attempt === CF_MAX_RETRIES) {
+        break;
+      }
+      const backoffMs = Math.min(20_000, 1000 * (2 ** (attempt - 1))) + Math.floor(Math.random() * 400);
+      console.warn(`[automation] Retrying Cloudflare ${mode} after ${backoffMs}ms due to: ${error?.message || 'unknown error'}`);
+      await sleep(backoffMs);
+    }
+  }
+
+  throw lastError || new Error(`Cloudflare ${mode} request failed`);
+}
+
+async function runCloudflareAcrossKeys(
+  model: string,
+  payload: any,
+  mode: 'text' | 'image',
+) {
+  const settings = await getSettings();
+  const totalKeys = (settings.cloudflare_configs || []).filter((item: any) => getEntryKey(item)).length;
+  if (!totalKeys) {
+    throw new Error('No keys configured for cloudflare_configs');
+  }
+
+  let lastError: any;
+  for (let idx = 0; idx < totalKeys; idx += 1) {
+    const selected = await pickRotatingKey('cloudflare_configs', 'cloudflare_rotation_index');
+    try {
+      const response = await runCloudflareWithRetry(selected.accountId, selected.key, model, payload, mode);
+      await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, true);
+      return response;
+    } catch (error: any) {
+      lastError = error;
+      await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, false);
+      console.warn(`[automation] Cloudflare key attempt failed; moving to next key (${idx + 1}/${totalKeys}): ${error?.message || 'unknown error'}`);
+    }
+  }
+
+  throw lastError || new Error(`Cloudflare ${mode} request failed for all keys`);
 }
 
 async function pickRotatingKey(
@@ -258,60 +388,68 @@ async function trackKeyUsage(
 
 async function uploadToCatbox(fileBuffer: Buffer, fileName: string) {
   const settings = await getSettings();
-  const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('userhash', settings.catbox_hash || '');
-  form.append('fileToUpload', fileBuffer, fileName);
+  const tempPath = path.join(os.tmpdir(), `catbox-${Date.now()}-${Math.random().toString(36).slice(2)}-${fileName}`);
+  await fs.writeFile(tempPath, fileBuffer);
+  try {
+    const { stdout } = await execFileAsync('curl', [
+      '-sS',
+      '-F',
+      'reqtype=fileupload',
+      '-F',
+      `userhash=${settings.catbox_hash || ''}`,
+      '-F',
+      `fileToUpload=@${tempPath}`,
+      'https://catbox.moe/user/api.php',
+    ], { maxBuffer: 20 * 1024 * 1024 });
 
-  const res = await axios.post('https://catbox.moe/user/api.php', form, {
-    headers: form.getHeaders()
-  });
-  return res.data;
+    const url = String(stdout || '').trim();
+    if (!/^https?:\/\//.test(url)) {
+      throw new Error(`Catbox upload failed: ${url || 'unknown response'}`);
+    }
+    return url;
+  } finally {
+    await fs.rm(tempPath, { force: true }).catch(() => {});
+  }
 }
 
 async function generateText(prompt: string, niche: string) {
-  const selected = await pickRotatingKey('cloudflare_configs', 'cloudflare_rotation_index');
   const currentSettings = await getSettings();
-  const textModel = currentSettings.cloudflare_text_model || DEFAULT_CF_TEXT_MODEL;
+  const textModel = currentSettings.cloudflare_text_model || LOCKED_CF_TEXT_MODEL;
 
-  try {
-    const res = await axios.post(
-      `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/${textModel}`,
-      {
-        messages: [
-          { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
-          { role: 'user', content: prompt }
-        ]
-      },
-      { headers: { Authorization: `Bearer ${selected.key}` } }
-    );
-
-    await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, true);
-    return res.data.result.response;
-  } catch (err) {
-    await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, false);
-    throw err;
+  if (textModel !== LOCKED_CF_TEXT_MODEL) {
+    throw new Error(`Cloudflare text model is locked to ${LOCKED_CF_TEXT_MODEL}. Found: ${textModel}`);
   }
+  console.log(`[automation] Cloudflare text model: ${textModel}`);
+
+  const response = await runCloudflareAcrossKeys(
+    textModel,
+    {
+      messages: [
+        { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
+        { role: 'user', content: prompt }
+      ]
+    },
+    'text',
+  );
+
+  const body: any = JSON.parse(String(response.data || '{}'));
+  return body?.result?.response || body?.response || '';
 }
 
 async function generateImage(prompt: string) {
-  const selected = await pickRotatingKey('cloudflare_configs', 'cloudflare_rotation_index');
   const currentSettings = await getSettings();
-  const imageModel = currentSettings.cloudflare_image_model || DEFAULT_CF_IMAGE_MODEL;
+  const imageModel = currentSettings.cloudflare_image_model || LOCKED_CF_IMAGE_MODEL;
 
-  try {
-    const res = await axios.post(
-      `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/${imageModel}`,
-      { prompt },
-      { headers: { Authorization: `Bearer ${selected.key}` }, responseType: 'arraybuffer' }
-    );
-
-    await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, true);
-    return Buffer.from(res.data);
-  } catch (err) {
-    await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, false);
-    throw err;
+  if (imageModel !== LOCKED_CF_IMAGE_MODEL) {
+    throw new Error(`Cloudflare image model is locked to ${LOCKED_CF_IMAGE_MODEL}. Found: ${imageModel}`);
   }
+  console.log(`[automation] Cloudflare image model: ${imageModel}`);
+
+  const response = await runCloudflareAcrossKeys(imageModel, { prompt }, 'image');
+  const parsed = JSON.parse(String(response.data || '{}'));
+  const base64Image = parsed?.result?.image;
+  if (!base64Image) throw new Error('Cloudflare image response missing result.image');
+  return Buffer.from(base64Image, 'base64');
 }
 
 async function generateVoiceover(text: string) {
@@ -387,12 +525,12 @@ async function pickUniqueTrendingTopic(supabase: any, niche: string) {
   const candidates = await fetchTrendingTopicsForNiche(niche);
   const { data: usedTopics } = await supabase
     .from('topics')
-    .select('title')
+    .select('topic')
     .eq('niche', niche)
     .order('created_at', { ascending: false })
     .limit(500);
 
-  const used = (usedTopics || []).map((row: any) => row.title).filter(Boolean);
+  const used = (usedTopics || []).map((row: any) => row.topic).filter(Boolean);
 
   const chosen = candidates.find((candidate) => {
     const normalized = normalizeTopicText(candidate);
@@ -434,22 +572,127 @@ Read the full article in the comments 👇
 ${hashtagBase}`;
 }
 
+function parsePngSize(buffer: Buffer) {
+  if (buffer.length < 24) return null;
+  if (buffer.readUInt32BE(0) !== 0x89504e47) return null;
+  return {
+    width: buffer.readUInt32BE(16),
+    height: buffer.readUInt32BE(20),
+    format: 'png',
+  };
+}
+
+function parseJpegSize(buffer: Buffer) {
+  if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buffer[offset + 1];
+    if ([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf].includes(marker)) {
+      return {
+        height: buffer.readUInt16BE(offset + 5),
+        width: buffer.readUInt16BE(offset + 7),
+        format: 'jpeg',
+      };
+    }
+    if (marker === 0xd9 || marker === 0xda) break;
+    const blockLength = buffer.readUInt16BE(offset + 2);
+    if (!blockLength) break;
+    offset += blockLength + 2;
+  }
+  return null;
+}
+
+function estimateByteDiversity(buffer: Buffer) {
+  const sampleSize = Math.min(buffer.length, 4096);
+  const step = Math.max(1, Math.floor(buffer.length / sampleSize));
+  const seen = new Set<number>();
+  for (let i = 0; i < buffer.length && seen.size < 256; i += step) {
+    seen.add(buffer[i]);
+  }
+  return seen.size / 256;
+}
+
+function validateGeneratedImage(buffer: Buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 30_000) {
+    return { ok: false, reason: 'image payload too small' };
+  }
+  const parsed = parsePngSize(buffer) || parseJpegSize(buffer);
+  if (!parsed) {
+    return { ok: false, reason: 'image format was not recognized as PNG/JPEG' };
+  }
+  if (parsed.width < 1024 || parsed.height < 720) {
+    return { ok: false, reason: `image dimensions too small (${parsed.width}x${parsed.height})` };
+  }
+  const diversity = estimateByteDiversity(buffer);
+  if (diversity < 0.18) {
+    return { ok: false, reason: `image appears too uniform (byte diversity ${diversity.toFixed(3)})` };
+  }
+  return { ok: true, ...parsed, diversity };
+}
+
+function getTopicPlanFromSchedule(schedule: any) {
+  const metadata = schedule?.metadata || {};
+  const sourceUrls = Array.isArray(metadata.source_urls)
+    ? metadata.source_urls.filter(Boolean)
+    : [];
+  return {
+    discoveredTopic: String(metadata.topic_override || metadata.discovered_topic || '').trim(),
+    researchSummary: String(metadata.research_summary || '').trim(),
+    sourceLabel: String(metadata.topic_source_label || metadata.topic_source || '').trim(),
+    sourceUrls,
+  };
+}
+
 async function publishToBlogger(blogId: string, title: string, content: string) {
   const settings = await getSettings();
-  const tokenRes = await axios.post('https://oauth2.googleapis.com/token', {
-    client_id: decryptSecret(settings.blogger_client_id),
-    client_secret: decryptSecret(settings.blogger_client_secret),
-    refresh_token: decryptSecret(settings.blogger_refresh_token),
-    grant_type: 'refresh_token'
-  });
-  const accessToken = tokenRes.data.access_token;
+  const clientId = decryptSecret(settings.blogger_client_id);
+  const clientSecret = decryptSecret(settings.blogger_client_secret);
+  const refreshToken = decryptSecret(settings.blogger_refresh_token);
+  const { stdout: tokenStdout } = await execFileAsync('curl', [
+    '-sS',
+    '-X',
+    'POST',
+    'https://oauth2.googleapis.com/token',
+    '-H',
+    'Content-Type: application/x-www-form-urlencoded',
+    '--data-urlencode',
+    `client_id=${clientId}`,
+    '--data-urlencode',
+    `client_secret=${clientSecret}`,
+    '--data-urlencode',
+    `refresh_token=${refreshToken}`,
+    '--data-urlencode',
+    'grant_type=refresh_token',
+  ], { maxBuffer: 5 * 1024 * 1024 });
+  const tokenPayload = JSON.parse(String(tokenStdout || '{}'));
+  const accessToken = tokenPayload?.access_token;
+  if (!accessToken) {
+    throw new Error(tokenPayload?.error_description || tokenPayload?.error || 'Failed to get Blogger access token');
+  }
 
-  const res = await axios.post(
+  const payload = JSON.stringify({ kind: 'blogger#post', title, content });
+  const { stdout: publishStdout } = await execFileAsync('curl', [
+    '-sS',
+    '-X',
+    'POST',
     `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts`,
-    { kind: 'blogger#post', title, content },
-    { headers: { Authorization: `Bearer ${accessToken}` } }
-  );
-  return res.data;
+    '-H',
+    `Authorization: Bearer ${accessToken}`,
+    '-H',
+    'Content-Type: application/json',
+    '--data-raw',
+    payload,
+  ], { maxBuffer: 10 * 1024 * 1024 });
+
+  const postPayload = JSON.parse(String(publishStdout || '{}'));
+  if (postPayload?.error) {
+    throw new Error(postPayload.error?.message || 'Failed to publish to Blogger');
+  }
+  return postPayload;
 }
 
 async function publishToFacebook(pageId: string, accessToken: string, message: string, link?: string) {
@@ -462,44 +705,96 @@ async function publishToFacebook(pageId: string, accessToken: string, message: s
 
 export async function runBlogAutomation(scheduleId: string) {
   const supabase = getSupabase();
-  const { data: schedule } = await supabase.from('schedules').select('*, blogger_accounts(*)').eq('id', scheduleId).single();
+  const { data: schedule } = await supabase.from('schedules').select('*').eq('id', scheduleId).single();
   if (!schedule) return;
 
-  const account = schedule.blogger_accounts;
+  const targetId = schedule.target_id || schedule.targetId;
+  if (!targetId) return;
+
+  const { data: account } = await supabase.from('blogger_accounts').select('*').eq('id', targetId).single();
+  if (!account) return;
+
+  const setScheduleStatus = async (status: string) => {
+    const metadata = {
+      ...(schedule.metadata || {}),
+      last_execution_status: status,
+      last_executed_at: new Date().toISOString(),
+    };
+    await supabase.from('schedules').update({ metadata }).eq('id', scheduleId);
+  };
+
   const niche = account.niche;
 
   try {
-    const discoveredTopic = await pickUniqueTrendingTopic(supabase, niche);
+    const topicPlan = getTopicPlanFromSchedule(schedule);
+    const discoveredTopic = topicPlan.discoveredTopic || await pickUniqueTrendingTopic(supabase, niche);
     const topic = await rewriteToViralTitle(discoveredTopic, niche);
+    const researchContext = topicPlan.researchSummary
+      ? `\nResearch notes to faithfully incorporate:\n${topicPlan.researchSummary}\n`
+      : '';
     const content = await generateText(
-      `Write a high-quality, engaging, professional blog article about: "${topic}" for niche "${niche}". Keep it topic-specific and non-generic. Return clean HTML.`,
+      `Write a high-quality, engaging, professional blog article about: "${topic}" for niche "${niche}". Keep it topic-specific, factual, and non-generic.${researchContext}Return clean HTML.`,
       niche,
     );
 
-    const imageBuffer = await generateImage(
-      `Create a realistic, high-impact image about: ${topic}. No text, no letters, no words, no logos, no watermark, no captions in the image.`,
-    );
+    let imageBuffer: Buffer | null = null;
+    let imageValidation: any = null;
+    let imageFailure: any = null;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const candidate = await generateImage(
+        `Create a realistic, high-impact image about: ${topic}. No text, no letters, no words, no logos, no watermark, no captions in the image.`,
+      );
+      const validation = validateGeneratedImage(candidate);
+      console.log(`[automation] Image validation attempt ${attempt}/3:`, validation);
+      if (validation.ok) {
+        imageBuffer = candidate;
+        imageValidation = validation;
+        break;
+      }
+      imageFailure = validation;
+    }
+    if (!imageBuffer) {
+      throw new Error(`Image validation failed after regeneration attempts: ${imageFailure?.reason || 'unknown error'}`);
+    }
 
     const imageUrl = await uploadToCatbox(imageBuffer, `blog-image-${Date.now()}.png`);
-    const bloggerPost = await publishToBlogger(account.blogger_id, topic, `<img src="${imageUrl}" style="width:100%" /><br/>${content}`);
+    const sourceLinksHtml = topicPlan.sourceUrls.length
+      ? `<h3>Sources</h3><ul>${topicPlan.sourceUrls.map((url: string) => `<li><a href="${url}">${url}</a></li>`).join('')}</ul>`
+      : '';
+    const bloggerPost = await publishToBlogger(
+      account.blogger_id,
+      topic,
+      `<img src="${imageUrl}" style="width:100%" /><br/>${content}${sourceLinksHtml}`,
+    );
 
-    await supabase.from('topics').insert({ niche, title: topic, used: true, created_at: new Date().toISOString() });
+    await supabase.from('topics').insert({
+      niche,
+      topic,
+      normalized_topic: normalizeTopicText(topic),
+      source: topicPlan.sourceLabel || 'automation',
+      used_for: scheduleId,
+      created_at: new Date().toISOString(),
+    });
 
     if (account.facebook_page_id) {
-      const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', account.facebook_page_id).single();
-      if (fbPage) {
-        const teaserMessage = buildFacebookTeaser(content, niche, bloggerPost.url);
-        const fbPost = await publishToFacebook(fbPage.page_id, fbPage.access_token, teaserMessage, imageUrl);
+      try {
+        const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', account.facebook_page_id).single();
+        if (fbPage) {
+          const teaserMessage = buildFacebookTeaser(content, niche, bloggerPost.url);
+          const fbPost = await publishToFacebook(fbPage.page_id, fbPage.access_token, teaserMessage, imageUrl);
 
-        await axios.post(
-          `https://graph.facebook.com/v19.0/${fbPost.id}/comments`,
-          {
-            message: `Full article is live here: ${bloggerPost.url}
+          await axios.post(
+            `https://graph.facebook.com/v19.0/${fbPost.id}/comments`,
+            {
+              message: `Full article is live here: ${bloggerPost.url}
 
 If this helped you, share your thoughts and read the full post now 🚀`,
-            access_token: fbPage.access_token,
-          },
-        );
+              access_token: fbPage.access_token,
+            },
+          );
+        }
+      } catch (facebookErr: any) {
+        console.warn('[automation] Facebook publish warning:', facebookErr?.message || facebookErr);
       }
     }
 
@@ -513,7 +808,7 @@ If this helped you, share your thoughts and read the full post now 🚀`,
       published_at: new Date().toISOString()
     });
 
-    await supabase.from('schedules').update({ last_execution_status: 'success', last_executed_at: new Date().toISOString() }).eq('id', scheduleId);
+    await setScheduleStatus('success');
   } catch (error: any) {
     console.error('Blog automation failed:', error);
     await supabase.from('posts').insert({
@@ -524,7 +819,7 @@ If this helped you, share your thoughts and read the full post now 🚀`,
       status: 'failed',
       published_at: new Date().toISOString()
     });
-    await supabase.from('schedules').update({ last_execution_status: `failed: ${error?.message || 'unknown'}`, last_executed_at: new Date().toISOString() }).eq('id', scheduleId);
+    await setScheduleStatus(`failed: ${error?.message || 'unknown'}`);
   }
 }
 
