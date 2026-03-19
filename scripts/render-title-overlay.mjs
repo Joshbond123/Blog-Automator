@@ -172,37 +172,67 @@ print(f'overlay_rendered {w}x{h}')
 
 async function main() {
   const sourceImageUrl = process.env.SOURCE_IMAGE_URL;
+  const sourceImagePath = process.env.SOURCE_IMAGE_PATH;
   const titleText = String(process.env.TITLE_TEXT || '').toUpperCase().trim();
   const catboxHash = process.env.CATBOX_HASH;
+  const correlationId = String(process.env.CORRELATION_ID || '').trim();
 
-  if (!sourceImageUrl || !titleText || !catboxHash) {
-    throw new Error('Missing SOURCE_IMAGE_URL, TITLE_TEXT, or CATBOX_HASH');
+  if ((!sourceImageUrl && !sourceImagePath) || !titleText) {
+    throw new Error('Missing SOURCE_IMAGE_URL/SOURCE_IMAGE_PATH or TITLE_TEXT');
   }
 
   const sourcePath = 'source-image';
   const outputPath = 'final-overlay.png';
 
-  await execFileAsync('curl', ['-fsSL', sourceImageUrl, '-o', sourcePath], { maxBuffer: 20 * 1024 * 1024 });
+  if (sourceImagePath) {
+    const repo = process.env.GITHUB_REPOSITORY;
+    const token = process.env.GITHUB_TOKEN;
+    if (!repo || !token) throw new Error('Missing GITHUB_REPOSITORY or GITHUB_TOKEN for SOURCE_IMAGE_PATH download');
+    const encodedPath = sourceImagePath.split('/').map(encodeURIComponent).join('/');
+    const res = await fetch(`https://api.github.com/repos/${repo}/contents/${encodedPath}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github+json',
+      },
+    });
+    if (!res.ok) throw new Error(`Failed to fetch source image from GitHub contents API (${res.status})`);
+    const payload = await res.json();
+    const b64 = String(payload?.content || '').replace(/\n/g, '');
+    if (!b64) throw new Error('GitHub contents API returned empty content.');
+    await fs.writeFile(sourcePath, Buffer.from(b64, 'base64'));
+  } else {
+    await execFileAsync('curl', ['-fsSL', sourceImageUrl, '-o', sourcePath], { maxBuffer: 20 * 1024 * 1024 });
+  }
   await validateImageFile(sourcePath, 'source');
 
   await renderOverlayWithPython(sourcePath, outputPath);
 
   await validateImageFile(outputPath, 'final');
 
-  const { stdout } = await execFileAsync('curl', [
-    '-sS',
-    '-F', 'reqtype=fileupload',
-    '-F', `userhash=${catboxHash}`,
-    '-F', `fileToUpload=@${outputPath}`,
-    'https://catbox.moe/user/api.php',
-  ], { maxBuffer: 20 * 1024 * 1024 });
-
-  const finalImageUrl = String(stdout || '').trim();
-  if (!/^https?:\/\//.test(finalImageUrl)) {
-    throw new Error(`Catbox upload failed: ${finalImageUrl || 'empty response'}`);
+  let finalImageUrl = '';
+  let catboxUploadError = '';
+  if (catboxHash) {
+    try {
+      const { stdout } = await execFileAsync('curl', [
+        '-sS',
+        '-F', 'reqtype=fileupload',
+        '-F', `userhash=${catboxHash}`,
+        '-F', `fileToUpload=@${outputPath}`,
+        'https://catbox.moe/user/api.php',
+      ], { maxBuffer: 20 * 1024 * 1024 });
+      const candidate = String(stdout || '').trim();
+      if (/^https?:\/\//.test(candidate)) finalImageUrl = candidate;
+      else catboxUploadError = candidate || 'empty response';
+    } catch (err) {
+      catboxUploadError = String(err?.message || err);
+    }
   }
 
-  await fs.writeFile('result.json', JSON.stringify({ finalImageUrl }, null, 2), 'utf8');
+  await fs.writeFile(
+    'result.json',
+    JSON.stringify({ correlationId, finalImageUrl, catboxUploadError, artifactImage: outputPath }, null, 2),
+    'utf8',
+  );
 }
 
 main().catch((err) => {
