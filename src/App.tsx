@@ -737,7 +737,7 @@ const Settings = () => {
     lightning_keys: [],
     ads_placement: 'after',
     cloudflare_text_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-    cloudflare_image_model: '@cf/black-forest-labs/flux-1-schnell'
+    cloudflare_image_model: '@cf/black-forest-labs/flux-2-dev'
   });
   const [fbPages, setFbPages] = useState<FacebookPage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -913,7 +913,7 @@ const Settings = () => {
     await saveSection('cloudflare', {
       cloudflare_configs: configs,
       cloudflare_text_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-      cloudflare_image_model: '@cf/black-forest-labs/flux-1-schnell'
+      cloudflare_image_model: '@cf/black-forest-labs/flux-2-dev'
     });
   };
 
@@ -1412,7 +1412,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     {validatingCloudflare || saving === 'cloudflare' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
                     Add Configuration
                   </button>
-                  <p className="text-xs text-zinc-500">Default models are applied automatically: <span className="text-zinc-300 font-mono">@cf/meta/llama-3.3-70b-instruct-fp8-fast</span> and <span className="text-zinc-300 font-mono">@cf/black-forest-labs/flux-1-schnell</span>.</p>
+                  <p className="text-xs text-zinc-500">Locked production models: <span className="text-zinc-300 font-mono">@cf/meta/llama-3.3-70b-instruct-fp8-fast</span> and <span className="text-zinc-300 font-mono">@cf/black-forest-labs/flux-2-dev</span>.</p>
 
                   <div className="space-y-4">
                     <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured Integrations</h4>
