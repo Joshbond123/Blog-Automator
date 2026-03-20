@@ -16,6 +16,16 @@ function normalizeTextInput(value?: string) {
   return typeof value === "string" ? value.normalize("NFKC").trim() : "";
 }
 
+function normalizeCredentialInput(value?: string) {
+  if (typeof value !== "string") return "";
+  return value
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "") // zero-width chars
+    .replace(/[\r\n\t ]+/g, "") // accidental whitespace/newlines from copy-paste
+    .replace(/[^\x20-\x7E]/g, "") // strip non-ASCII characters introduced by bad encoding
+    .trim();
+}
+
 function assertByteString(name: string, value: string) {
   for (let i = 0; i < value.length; i += 1) {
     if (value.charCodeAt(i) > 255) {
@@ -26,8 +36,8 @@ function assertByteString(name: string, value: string) {
 
 function sanitizeSupabaseConfig(config: Partial<SupabaseConfig>) {
   const url = normalizeTextInput(config.url);
-  const serviceRoleKey = normalizeTextInput(config.serviceRoleKey);
-  const anonKey = typeof config.anonKey === "string" ? normalizeTextInput(config.anonKey) : config.anonKey;
+  const serviceRoleKey = normalizeCredentialInput(config.serviceRoleKey);
+  const anonKey = typeof config.anonKey === "string" ? normalizeCredentialInput(config.anonKey) : config.anonKey;
 
   if (url) assertByteString("SUPABASE_URL", url);
   if (serviceRoleKey) assertByteString("SUPABASE_SERVICE_ROLE_KEY", serviceRoleKey);

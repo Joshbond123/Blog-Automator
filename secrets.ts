@@ -11,6 +11,28 @@ function getEncryptionKey() {
   return crypto.createHash("sha256").update(source).digest();
 }
 
+function normalizeKeyMaterial(value: string) {
+  return value
+    .normalize("NFKC")
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, "")
+    .replace(/[\r\n\t ]+/g, "")
+    .replace(/[^\x20-\x7E]/g, "")
+    .trim();
+}
+
+function getEncryptionKeyCandidates() {
+  const rawCandidates = [
+    process.env.APP_ENCRYPTION_KEY || "",
+    process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+  ].filter(Boolean);
+  const normalizedCandidates = rawCandidates.map((v) => normalizeKeyMaterial(v)).filter(Boolean);
+  const unique = Array.from(new Set([...rawCandidates, ...normalizedCandidates]));
+  if (!unique.length) {
+    throw new Error("Missing APP_ENCRYPTION_KEY or SUPABASE_SERVICE_ROLE_KEY for secret encryption.");
+  }
+  return unique.map((source) => crypto.createHash("sha256").update(source).digest());
+}
+
 export function encryptSecret(value?: string | null) {
   if (!value) return value || "";
   if (value.startsWith(PREFIX)) return value;
@@ -31,10 +53,16 @@ export function decryptSecret(value?: string | null) {
   const iv = raw.subarray(0, 12);
   const tag = raw.subarray(12, 28);
   const payload = raw.subarray(28);
-  const key = getEncryptionKey();
-
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(tag);
-  const decrypted = Buffer.concat([decipher.update(payload), decipher.final()]);
-  return decrypted.toString("utf8");
+  const keys = getEncryptionKeyCandidates();
+  for (const key of keys) {
+    try {
+      const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+      decipher.setAuthTag(tag);
+      const decrypted = Buffer.concat([decipher.update(payload), decipher.final()]);
+      return decrypted.toString("utf8");
+    } catch {
+      // try next key candidate
+    }
+  }
+  throw new Error("Failed to decrypt secret with available key material.");
 }
