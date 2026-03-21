@@ -706,7 +706,7 @@ async function generateWorkersAiImageWithRetry(topic: string, niche: string, max
   throw new Error(`Workers AI image generation failed after ${maxAttempts} attempts: ${String(lastError?.message || lastError)}`);
 }
 
-async function createFinalBlogImageOrThrow(topic: string, niche: string, settings: any, options?: { reuseVerifiedImage?: boolean; skipOverlay?: boolean }) {
+async function createFinalBlogImageOrThrow(topic: string, niche: string, settings: any) {
   const githubPat = decryptSecret(settings.github_pat || '');
   const githubRepo = String(settings.github_repo || '').trim();
   const catboxHash = decryptSecret(settings.catbox_hash || '');
@@ -714,63 +714,20 @@ async function createFinalBlogImageOrThrow(topic: string, niche: string, setting
   if (!githubRepo) throw new Error('Missing github_repo setting for title overlay workflow.');
   if (!catboxHash) throw new Error('Missing catbox_hash setting for image handoff workflow.');
 
-  let workersImage: Buffer;
-  let sourceImageUrl = '';
-  try {
-    if (options?.reuseVerifiedImage) throw new Error('reuse verified image requested');
-    workersImage = await generateWorkersAiImageWithRetry(topic, niche, 6);
-    assertRealGeneratedImage(workersImage, 'Workers AI image');
-    const workersFilename = `workers-ai-${Date.now()}.png`;
-    sourceImageUrl = await uploadToCatbox(workersImage, workersFilename);
-  } catch (err: any) {
-    console.warn(`[automation] Workers AI image generation failed; attempting recovery from verified history: ${String(err?.message || err)}`);
-    const supabase = getSupabase();
-    const { data: recentPosts } = await supabase
-      .from('posts')
-      .select('metadata,niche,published_at')
-      .eq('niche', niche)
-      .order('published_at', { ascending: false })
-      .limit(20);
-    const recoveredUrl = (recentPosts || [])
-      .map((row: any) => String(row?.metadata?.image_pipeline?.workers_image_url || '').trim())
-      .find((url: string) => /^https?:\/\/.+/i.test(url));
-    if (recoveredUrl) {
-      const recoveredRes = await axios.get(recoveredUrl, outboundConfig({ responseType: 'arraybuffer', timeout: 60000 }));
-      workersImage = Buffer.from(recoveredRes.data);
-      assertRealGeneratedImage(workersImage, 'Recovered Workers AI image');
-      sourceImageUrl = recoveredUrl;
-    } else {
-      const sourceDir = 'automation/source';
-      const names = (await fs.readdir(sourceDir)).filter((name) => /\.png$/i.test(name)).sort();
-      const latest = names[names.length - 1];
-      if (!latest) throw err;
-      workersImage = await fs.readFile(`${sourceDir}/${latest}`);
-      assertRealGeneratedImage(workersImage, 'Recovered Workers AI image from local source cache');
-      sourceImageUrl = await uploadToCatbox(workersImage, `workers-ai-recovered-${Date.now()}.png`);
-    }
-  }
-
+  const workersImage = await generateWorkersAiImageWithRetry(topic, niche, 6);
+  assertRealGeneratedImage(workersImage, 'Workers AI image');
+  const workersFilename = `workers-ai-${Date.now()}.png`;
+  const sourceImageUrl = await uploadToCatbox(workersImage, workersFilename);
   if (!/^https?:\/\/.+/i.test(sourceImageUrl)) throw new Error('Workers AI image upload URL is invalid.');
 
-  let finalBuffer = workersImage;
-  if (!options?.skipOverlay) {
-    try {
-      const sourceImagePath = `automation/incoming/workers-ai-${Date.now()}.png`;
-      await uploadBufferToGithub(githubRepo, githubPat, workersImage, sourceImagePath, `Upload Workers AI source image: ${topic}`);
+  const sourceImagePath = `automation/incoming/workers-ai-${Date.now()}.png`;
+  await uploadBufferToGithub(githubRepo, githubPat, workersImage, sourceImagePath, `Upload Workers AI source image: ${topic}`);
 
-      const correlationId = await dispatchTitleOverlayWorkflow(githubRepo, githubPat, sourceImageUrl, sourceImagePath, topic, catboxHash);
-      const overlayBuffer = await waitForOverlayArtifact(githubRepo, githubPat, correlationId);
-      assertRealGeneratedImage(overlayBuffer, 'Overlay output image');
-      finalBuffer = overlayBuffer;
-    } catch (overlayError: any) {
-      console.warn(`[automation] Overlay workflow unavailable; publishing with verified source image instead: ${String(overlayError?.message || overlayError)}`);
-    }
-  }
-
-  const finalFilename = `final-overlay-${Date.now()}.png`;
-  const finalImageUrl = await uploadToCatbox(finalBuffer, finalFilename);
-  if (!/^https?:\/\/.+/i.test(finalImageUrl)) throw new Error('Final overlay image upload URL is invalid.');
-  return { sourceImageUrl, finalImageUrl };
+  const correlationId = await dispatchTitleOverlayWorkflow(githubRepo, githubPat, sourceImageUrl, sourceImagePath, topic, catboxHash);
+  const overlayResult = await waitForOverlayArtifact(githubRepo, githubPat, correlationId);
+  assertRealGeneratedImage(overlayResult.overlayBuffer, 'Overlay output image');
+  if (!/^https?:\/\/.+/i.test(overlayResult.finalImageUrl)) throw new Error('Final overlaid image URL is invalid.');
+  return { sourceImageUrl, finalImageUrl: overlayResult.finalImageUrl };
 }
 
 async function generateVoiceover(text: string) {
@@ -792,40 +749,225 @@ async function generateVoiceover(text: string) {
 }
 
 
+const TOPIC_STOPWORDS = new Set([
+  'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from', 'how', 'in', 'into', 'is', 'it',
+  'its', 'new', 'of', 'on', 'or', 'that', 'the', 'their', 'this', 'to', 'what', 'when', 'where',
+  'why', 'with', 'after', 'before', 'latest', 'breaking', 'trending', 'report', 'reports', 'study',
+  'studies', 'reveals', 'reveal', 'shows', 'show', 'could', 'may', 'might', 'over', 'under',
+]);
+
 function normalizeTopicText(text: string) {
-  return text
+  return String(text || '')
+    .normalize('NFKC')
     .toLowerCase()
+    .replace(/&/g, ' and ')
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+function topicTokens(text: string) {
+  return normalizeTopicText(text).split(' ').filter(Boolean);
+}
+
+function extractTopicKeywords(text: string) {
+  return topicTokens(text)
+    .filter((token) => token.length >= 3 && !TOPIC_STOPWORDS.has(token))
+    .slice(0, 12);
+}
+
+function extractTopicEntities(text: string) {
+  const matches = String(text || '').match(/\b(?:[A-Z][a-z]+|[A-Z]{2,}|\d{4})(?:\s+(?:[A-Z][a-z]+|[A-Z]{2,}|\d{4})){0,3}\b/g) || [];
+  return matches
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .filter((entry, index, list) => list.findIndex((candidate) => candidate.toLowerCase() === entry.toLowerCase()) === index)
+    .slice(0, 8);
+}
+
+function buildTopicThemeSignature(text: string) {
+  const keywords = extractTopicKeywords(text);
+  return Array.from(new Set(keywords)).sort().slice(0, 6);
+}
+
+function overlapRatio(a: Iterable<string>, b: Iterable<string>) {
+  const aa = new Set(Array.from(a).filter(Boolean));
+  const bb = new Set(Array.from(b).filter(Boolean));
+  if (!aa.size || !bb.size) return 0;
+  const intersection = [...aa].filter((value) => bb.has(value)).length;
+  return intersection / Math.min(aa.size, bb.size);
+}
+
 function jaccardSimilarity(a: string, b: string) {
-  const aa = new Set(normalizeTopicText(a).split(' ').filter(Boolean));
-  const bb = new Set(normalizeTopicText(b).split(' ').filter(Boolean));
+  const aa = new Set(topicTokens(a));
+  const bb = new Set(topicTokens(b));
   if (!aa.size || !bb.size) return 0;
   const intersection = [...aa].filter((x) => bb.has(x)).length;
   const union = new Set([...aa, ...bb]).size;
   return union ? intersection / union : 0;
 }
 
-async function fetchTrendingTopicsForNiche(niche: string) {
-  const queries = [
+function bigramSimilarity(a: string, b: string) {
+  const toBigrams = (value: string) => {
+    const tokens = topicTokens(value);
+    const grams = [];
+    for (let i = 0; i < tokens.length - 1; i += 1) grams.push(`${tokens[i]} ${tokens[i + 1]}`);
+    return grams;
+  };
+  return overlapRatio(toBigrams(a), toBigrams(b));
+}
+
+function topicSimilaritySignals(candidate: string, previous: string) {
+  const normalizedCandidate = normalizeTopicText(candidate);
+  const normalizedPrevious = normalizeTopicText(previous);
+  const keywordOverlap = overlapRatio(extractTopicKeywords(candidate), extractTopicKeywords(previous));
+  const entityOverlap = overlapRatio(
+    extractTopicEntities(candidate).map((value) => value.toLowerCase()),
+    extractTopicEntities(previous).map((value) => value.toLowerCase()),
+  );
+  const themeOverlap = overlapRatio(buildTopicThemeSignature(candidate), buildTopicThemeSignature(previous));
+  const lexicalSimilarity = jaccardSimilarity(normalizedCandidate, normalizedPrevious);
+  const phraseSimilarity = bigramSimilarity(candidate, previous);
+  const sameLeadingTheme = buildTopicThemeSignature(candidate).join('|') === buildTopicThemeSignature(previous).join('|');
+  return {
+    normalizedCandidate,
+    normalizedPrevious,
+    keywordOverlap,
+    entityOverlap,
+    themeOverlap,
+    lexicalSimilarity,
+    phraseSimilarity,
+    sameLeadingTheme,
+  };
+}
+
+async function semanticDuplicateCheck(candidate: string, previousTopics: string[], niche: string) {
+  if (!previousTopics.length) return '';
+  try {
+    const response = await generateText(
+      [
+        `Candidate topic: ${candidate}`,
+        'Existing topics:',
+        ...previousTopics.map((topic, index) => `${index + 1}. ${topic}`),
+        '',
+        'If the candidate is the same event, same core subject, or a near-duplicate of any existing topic, return only the exact matching existing topic.',
+        'If none are near-duplicates, return only NONE.',
+      ].join('\n'),
+      niche,
+    );
+    const normalized = String(response || '').trim();
+    if (!normalized || /^none$/i.test(normalized)) return '';
+    return previousTopics.find((topic) => normalizeTopicText(topic) === normalizeTopicText(normalized)) || '';
+  } catch {
+    return '';
+  }
+}
+
+function buildTrendingQueriesForNiche(niche: string) {
+  const generic = [
     niche,
-    `${niche} trends`,
-    `${niche} breaking news`,
-    `${niche} latest`,
-    `${niche} insights`,
+    `${niche} latest news`,
+    `${niche} trending story`,
+    `${niche} breaking discovery`,
+    `${niche} research update`,
+    `${niche} surprising discovery`,
+    `${niche} expert analysis`,
+    `${niche} science news`,
+    `${niche} investigation`,
+    `${niche} viral topic`,
   ];
 
+  const nicheSpecific: Record<string, string[]> = {
+    'Weird Facts & Discoveries': [
+      'strange discovery',
+      'bizarre science discovery',
+      'ancient mystery discovery',
+      'space mystery discovery',
+      'ocean mystery discovery',
+      'archaeology surprise find',
+      'antarctica discovery',
+      'fossil discovery',
+      'unexpected research finding',
+      'rare natural phenomenon',
+      'hidden underground discovery',
+      'unusual wildlife discovery',
+    ],
+    'Scary / Mysterious / True Crime': [
+      'true crime case update',
+      'cold case breakthrough',
+      'mystery investigation',
+      'forensic discovery',
+      'criminal case timeline',
+      'unexplained case report',
+      'mysterious disappearance update',
+      'court filing crime case',
+      'evidence breakthrough',
+      'detective investigation news',
+    ],
+    'AI Tools & Technology': [
+      'AI product launch',
+      'LLM release',
+      'AI startup funding',
+      'developer tool update',
+      'open source AI release',
+      'robotics breakthrough',
+      'tech platform launch',
+      'software release notes',
+      'cloud AI feature',
+      'automation platform update',
+    ],
+    'Life Hacks & Tips': [
+      'productivity study',
+      'consumer tip trend',
+      'home organization idea',
+      'money saving technique',
+      'travel hack',
+      'kitchen hack',
+      'phone setting tip',
+      'work routine improvement',
+      'shopping trick',
+      'time saving method',
+    ],
+    'Viral Entertainment': [
+      'celebrity trend',
+      'streaming hit',
+      'movie surprise',
+      'music viral moment',
+      'social media trend',
+      'entertainment rumor clarified',
+      'fan theory trend',
+      'festival headline',
+      'tv finale reaction',
+      'internet culture trend',
+    ],
+    'Health & Wellness Hacks': [
+      'wellness study',
+      'nutrition trend',
+      'sleep research',
+      'fitness science',
+      'mental health strategy',
+      'longevity research',
+      'healthy habit study',
+      'exercise finding',
+      'diet research update',
+      'stress management study',
+    ],
+  };
+
+  return Array.from(new Set([...(nicheSpecific[niche] || []), ...generic])).slice(0, 24);
+}
+
+async function fetchTrendingTopicsForNiche(niche: string) {
+  const queries = buildTrendingQueriesForNiche(niche);
   const collected: string[] = [];
+
   for (const query of queries) {
     try {
       const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
       const res = await axios.get(rssUrl, { timeout: 10000 });
       const xml = String(res.data || '');
       const matches = [...xml.matchAll(/<title>([^<]+)<\/title>/g)].map((m) => m[1].replace(/&amp;/g, '&').trim());
-      const topicTitles = matches.slice(1); // skip feed title
+      const topicTitles = matches.slice(1, 16);
       collected.push(...topicTitles);
     } catch {
       // continue with remaining feeds
@@ -834,40 +976,78 @@ async function fetchTrendingTopicsForNiche(niche: string) {
 
   const deduped: string[] = [];
   for (const topic of collected) {
-    if (!topic || deduped.some((t) => normalizeTopicText(t) === normalizeTopicText(topic))) continue;
+    const normalized = normalizeTopicText(topic);
+    if (!normalized) continue;
+    if (deduped.some((existing) => normalizeTopicText(existing) === normalized)) continue;
     deduped.push(topic);
-    if (deduped.length >= 50) break;
+    if (deduped.length >= 120) break;
   }
 
-  return deduped;
+  return deduped.slice(0, 100);
+}
+
+async function loadHistoricalTopicsForNiche(supabase: any, niche: string) {
+  const [topicsRes, postsRes] = await Promise.all([
+    supabase.from('topics').select('title,created_at').eq('niche', niche).order('created_at', { ascending: false }).limit(800),
+    supabase.from('posts').select('title,published_at').eq('niche', niche).order('published_at', { ascending: false }).limit(800),
+  ]);
+
+  const combined = [
+    ...((topicsRes.data || []).map((row: any) => row.title)),
+    ...((postsRes.data || []).map((row: any) => row.title)),
+  ].filter(Boolean);
+
+  return Array.from(new Set(combined.map((title: string) => title.trim()).filter(Boolean)));
+}
+
+async function findDuplicateTopicMatch(candidate: string, historicalTopics: string[], niche: string) {
+  const borderline: string[] = [];
+
+  for (const previous of historicalTopics) {
+    const signals = topicSimilaritySignals(candidate, previous);
+    if (!signals.normalizedCandidate || !signals.normalizedPrevious) continue;
+
+    if (signals.normalizedCandidate === signals.normalizedPrevious) return previous;
+    if (signals.keywordOverlap >= 0.85 && signals.entityOverlap >= 0.6) return previous;
+    if (signals.entityOverlap >= 0.75 && signals.themeOverlap >= 0.65) return previous;
+    if (signals.lexicalSimilarity >= 0.8 || signals.phraseSimilarity >= 0.7) return previous;
+    if (signals.sameLeadingTheme && (signals.keywordOverlap >= 0.72 || signals.themeOverlap >= 0.8)) return previous;
+
+    const moderateMatch = signals.keywordOverlap >= 0.55 || signals.entityOverlap >= 0.45 || signals.themeOverlap >= 0.65 || signals.lexicalSimilarity >= 0.6;
+    if (moderateMatch) borderline.push(previous);
+  }
+
+  if (borderline.length) {
+    const semanticMatch = await semanticDuplicateCheck(candidate, borderline.slice(0, 8), niche);
+    if (semanticMatch) return semanticMatch;
+  }
+
+  return '';
 }
 
 async function pickUniqueTrendingTopic(supabase: any, niche: string) {
   const candidates = await fetchTrendingTopicsForNiche(niche);
-  const { data: usedTopics } = await supabase
-    .from('topics')
-    .select('title')
-    .eq('niche', niche)
-    .order('created_at', { ascending: false })
-    .limit(500);
+  if (candidates.length < 100) {
+    console.warn(`[automation] Trending topic fetch returned ${candidates.length} unique candidates for niche="${niche}".`);
+  }
 
-  const used = (usedTopics || []).map((row: any) => row.title).filter(Boolean);
+  const historicalTopics = await loadHistoricalTopicsForNiche(supabase, niche);
+  const rejected: Array<{ candidate: string; matched: string }> = [];
 
-  const chosen = candidates.find((candidate) => {
-    const normalized = normalizeTopicText(candidate);
-    return !used.some((u) => {
-      const nu = normalizeTopicText(u);
-      return nu === normalized || jaccardSimilarity(nu, normalized) >= 0.72;
-    });
-  });
+  for (const candidate of candidates) {
+    const match = await findDuplicateTopicMatch(candidate, historicalTopics, niche);
+    if (match) {
+      rejected.push({ candidate, matched: match });
+      continue;
+    }
+    console.log(`[automation] Selected unique topic after reviewing ${candidates.length} candidates and ${historicalTopics.length} historical topics.`);
+    if (rejected.length) {
+      console.log(`[automation] Rejected ${rejected.length} duplicate or near-duplicate candidates before selecting topic.`);
+    }
+    return candidate;
+  }
 
-  if (chosen) return chosen;
-
-  const aiFallback = await generateText(
-    `Generate one unique, highly specific, trending topic for niche: ${niche}. Return only topic title. Must be different from common repeated topics.`,
-    niche,
-  );
-  return aiFallback;
+  throw new Error(`Unable to find a unique topic for niche="${niche}" after checking ${candidates.length} trending candidates against ${historicalTopics.length} historical topics.`);
 }
 
 async function rewriteToViralTitle(topic: string, niche: string) {
@@ -877,15 +1057,64 @@ async function rewriteToViralTitle(topic: string, niche: string) {
   );
 }
 
-function buildFacebookTeaser(fullContent: string, niche: string, blogUrl: string) {
+function deterministicTopicHashtags(topic: string) {
+  const entities = extractTopicEntities(topic)
+    .map((entry) => `#${entry.replace(/[^A-Za-z0-9]+/g, '')}`)
+    .filter((entry) => entry.length > 3);
+  const keywords = extractTopicKeywords(topic)
+    .map((entry) => `#${entry.split(/[^a-z0-9]+/i).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('')}`)
+    .filter((entry) => entry.length > 3);
+  const viralized = [
+    ...entities,
+    ...keywords,
+    ...keywords.map((entry) => `${entry}Alert`),
+    ...keywords.map((entry) => `${entry}Watch`),
+    ...entities.map((entry) => `${entry}Mystery`),
+  ];
+
+  const unique = Array.from(new Set(viralized.map((value) => value.replace(/#+/g, '#').replace(/[^#A-Za-z0-9]/g, ''))))
+    .filter((value) => /^#[A-Za-z0-9]{4,32}$/.test(value));
+
+  return unique.slice(0, 5);
+}
+
+async function generateViralHashtags(topic: string, niche: string, content: string) {
+  const deterministic = deterministicTopicHashtags(topic);
+  try {
+    const response = await generateText(
+      [
+        `Topic: ${topic}`,
+        `Niche context: ${niche}`,
+        `Article preview: ${stripHtml(content).slice(0, 500)}`,
+        'Generate exactly 5 viral-style hashtags for this blog post.',
+        'Rules: output only hashtags, no numbering, no commentary, no generic tags like #Viral or #Trending unless they are topic-specific.',
+      ].join('\n'),
+      niche,
+    );
+    const parsed = Array.from(new Set((String(response || '').match(/#[A-Za-z0-9]+/g) || []).map((value) => value.trim())));
+    if (parsed.length === 5) return parsed;
+  } catch {
+    // fall back to deterministic hashtags
+  }
+
+  if (deterministic.length >= 5) return deterministic.slice(0, 5);
+  const filler = ['#DeepDiveStory', '#ScienceWatch', '#StoryBehindTheIce', '#DiscoveryAlert', '#GlobalSignals'];
+  return Array.from(new Set([...deterministic, ...filler])).slice(0, 5);
+}
+
+function injectHashtagBlock(content: string, hashtags: string[]) {
+  const block = `<p><strong>${hashtags.join(' ')}</strong></p>`;
+  const paragraphs = [...String(content || '').matchAll(/<p\b[^>]*>[\s\S]*?<\/p>/gi)];
+  if (!paragraphs.length) return `${content}${block}`;
+  const last = paragraphs[paragraphs.length - 1];
+  const start = last.index || 0;
+  return `${content.slice(0, start)}${block}${content.slice(start)}`;
+}
+
+function buildFacebookTeaser(fullContent: string, topic: string, niche: string, hashtags: string[], blogUrl: string) {
   const plain = fullContent.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   const teaser = plain.slice(0, 280);
-  const hashtagBase = niche
-    .split(/[^A-Za-z0-9]+/)
-    .filter(Boolean)
-    .slice(0, 3)
-    .map((w) => `#${w}`)
-    .join(' ');
+  const hashtagBase = hashtags.slice(0, 5).join(' ') || deterministicTopicHashtags(topic).slice(0, 5).join(' ');
 
   return `${teaser}...
 
@@ -1097,6 +1326,7 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
   const { owner, name } = parseGithubRepo(repo);
   const startedAt = Date.now();
   let runId = '';
+  const expectedRunName = `Title Overlay Renderer - ${correlationId}`;
 
   for (let i = 0; i < 36; i++) {
     const runsRes = await axios.get(
@@ -1107,7 +1337,7 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
     const runs = Array.isArray(runsRes.data?.workflow_runs) ? runsRes.data.workflow_runs : [];
     const candidate = runs.find((run: any) => {
       const created = Date.parse(run?.created_at || '');
-      return run?.name === 'Title Overlay Renderer' && created >= startedAt - 60_000;
+      return run?.name === expectedRunName && created >= startedAt - 60_000;
     });
     if (candidate) {
       runId = String(candidate.id);
@@ -1128,7 +1358,7 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
     `https://api.github.com/repos/${owner}/${name}/actions/runs/${runId}/artifacts`,
     outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
   );
-  const artifact = (artifactsRes.data?.artifacts || []).find((a: any) => a?.name === 'title-overlay-result');
+  const artifact = (artifactsRes.data?.artifacts || []).find((a: any) => a?.name === `title-overlay-result-${correlationId}`);
   if (!artifact?.archive_download_url) throw new Error('Overlay artifact not found.');
 
   const zipRes = await axios.get(artifact.archive_download_url, outboundConfig({
@@ -1138,15 +1368,24 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
   }));
   const zipPath = `/tmp/overlay-${correlationId}.zip`;
   const imagePath = `/tmp/overlay-${correlationId}.png`;
+  const resultPath = `/tmp/overlay-${correlationId}.json`;
   await fs.writeFile(zipPath, Buffer.from(zipRes.data));
+  await execFileAsync('unzip', ['-p', zipPath, 'result.json'], { maxBuffer: 40 * 1024 * 1024, encoding: 'utf8' as any })
+    .then(async ({ stdout }) => {
+      await fs.writeFile(resultPath, String(stdout || ''));
+    });
   await execFileAsync('unzip', ['-p', zipPath, 'final-overlay.png'], { maxBuffer: 40 * 1024 * 1024, encoding: 'buffer' as any })
     .then(async ({ stdout }) => {
       const out = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout as any);
       await fs.writeFile(imagePath, out);
     });
+  const resultPayload = JSON.parse(await fs.readFile(resultPath, 'utf8'));
+  if (String(resultPayload?.correlationId || '') !== correlationId) {
+    throw new Error('Overlay artifact correlation mismatch.');
+  }
   const overlayBuffer = await fs.readFile(imagePath);
   if (overlayBuffer.length < 15 * 1024) throw new Error('Overlay image artifact is too small.');
-  return overlayBuffer;
+  return { overlayBuffer, finalImageUrl: String(resultPayload?.finalImageUrl || '').trim() };
 }
 
 async function publishToFacebook(pageId: string, accessToken: string, message: string, link?: string) {
@@ -1179,12 +1418,9 @@ export async function runBlogAutomation(scheduleId: string) {
     const forcedTopic = String((schedule?.metadata as any)?.forced_topic || '').trim() || process.env.FORCED_TOPIC || '';
     const discoveredTopic = forcedTopic || await pickUniqueTrendingTopic(supabase, niche);
     const topic = forcedTopic || await rewriteToViralTitle(discoveredTopic, niche);
-    const forceFallbackArticle = Boolean((schedule?.metadata as any)?.force_fallback_article);
-    const reuseVerifiedImage = Boolean((schedule?.metadata as any)?.reuse_verified_image);
-    const skipImageOverlay = Boolean((schedule?.metadata as any)?.skip_image_overlay);
     let content = '';
     try {
-      content = forceFallbackArticle ? buildFallbackArticle(topic, niche) : await generateCleanCompleteArticle(topic, niche);
+      content = await generateCleanCompleteArticle(topic, niche);
     } catch (contentError: any) {
       const status = Number(contentError?.response?.status || 0);
       if (status === 429) {
@@ -1197,12 +1433,14 @@ export async function runBlogAutomation(scheduleId: string) {
     if (looksTruncated(content)) {
       throw new Error('Generated article failed completeness/structure validation.');
     }
-    const { sourceImageUrl, finalImageUrl } = await createFinalBlogImageOrThrow(topic, niche, settings, { reuseVerifiedImage, skipOverlay: skipImageOverlay });
+    const cleanedArticle = removeExternalReferencesAndDuplicateParagraphs(content);
+    const hashtags = await generateViralHashtags(topic, niche, cleanedArticle);
+    const articleWithHashtags = injectHashtagBlock(cleanedArticle, hashtags);
+    const { sourceImageUrl, finalImageUrl } = await createFinalBlogImageOrThrow(topic, niche, settings);
     const imageAlt = `${topic} - AI generated cover image`;
     const imageBlock = `<img src="${finalImageUrl}" alt="${imageAlt.replace(/"/g, '&quot;')}" style="display:block;width:100%;max-width:1200px;height:auto;margin:12px auto;object-fit:cover;" /><br/>`;
 
-    const cleanedArticle = removeExternalReferencesAndDuplicateParagraphs(content);
-    const sanitizedHeaders = sanitizeHeaders(`${imageBlock}${cleanedArticle}`, topic);
+    const sanitizedHeaders = sanitizeHeaders(`${imageBlock}${articleWithHashtags}`, topic);
     const normalizedBody = enforceParagraphLengthAndQuestion(sanitizedHeaders, topic);
     const seoInjected = injectSeoMetaTags(topic, normalizedBody, finalImageUrl, account.name);
     const gate = qualityGate(seoInjected.html, seoInjected.metaDescription);
@@ -1236,7 +1474,7 @@ export async function runBlogAutomation(scheduleId: string) {
       const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', account.facebook_page_id).single();
       if (fbPage) {
         try {
-          const teaserMessage = buildFacebookTeaser(content, niche, bloggerPost.url);
+          const teaserMessage = buildFacebookTeaser(content, topic, niche, hashtags, bloggerPost.url);
           const fbPost = await publishToFacebook(fbPage.page_id, fbPage.access_token, teaserMessage, finalImageUrl);
 
           await axios.post(
@@ -1269,6 +1507,7 @@ If this helped you, share your thoughts and read the full post now 🚀`,
           workers_image_url: sourceImageUrl,
           final_image_url: finalImageUrl,
         },
+        hashtags,
       },
     });
 
@@ -1278,6 +1517,7 @@ If this helped you, share your thoughts and read the full post now 🚀`,
     }
     console.log(`✓ Workers AI source image: ${sourceImageUrl}`);
     console.log(`✓ Final overlaid image: ${finalImageUrl}`);
+    console.log(`✓ Viral hashtags: ${hashtags.join(' ')}`);
     console.log('✓ Internal related-link injection: disabled for focused article quality');
     console.log(`✓ Scheduled publish time: ${publishAt || 'immediate'}`);
     console.log(`✓ Blogger post ID: ${bloggerPost.id}`);
