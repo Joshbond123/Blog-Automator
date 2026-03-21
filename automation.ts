@@ -367,19 +367,36 @@ function stripSourceSectionsAndUrls(content: string) {
   return cleaned.trim();
 }
 
+function canonicalizeParagraph(text: string) {
+  return stripHtml(text)
+    .toLowerCase()
+    .replace(/\b(?:19|20)\d{2}\b/g, 'YEAR')
+    .replace(/\b\d+(?:\.\d+)?\b/g, 'NUM')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function removeExternalReferencesAndDuplicateParagraphs(content: string) {
   let cleaned = String(content || '');
   cleaned = cleaned.replace(/<a\b[^>]*href=["']https?:\/\/[^"']+["'][^>]*>([\s\S]*?)<\/a>/gi, '$1');
-  cleaned = cleaned.replace(/<p[^>]*>[\s\S]*?(?:for (?:a )?reference|read more|another useful|source:|sources:)[\s\S]*?<\/p>/gi, '');
+  cleaned = cleaned.replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, '$1');
+  cleaned = cleaned.replace(/<h[23][^>]*>\s*Related Reads[\s\S]*?<\/h[23]>\s*(?:<(?:ul|ol)[^>]*>[\s\S]*?<\/(?:ul|ol)>|<p[^>]*>[\s\S]*?<\/p>)?/gi, '');
+  cleaned = cleaned.replace(/<(?:ul|ol)[^>]*>[\s\S]*?<\/(?:ul|ol)>/gi, (block) => /related reads|read more|companion|earlier posts/i.test(stripHtml(block)) ? '' : block);
+  cleaned = cleaned.replace(/<p[^>]*>[\s\S]*?(?:for (?:a )?reference|read more|another useful|source:|sources:|references?:|citations?:|related reads|if you missed our earlier posts|visit\s+[^.]+website)[\s\S]*?<\/p>/gi, '');
 
-  const seen = new Set<string>();
+  const seenExact = new Set<string>();
+  const seenCanonical = new Set<string>();
   cleaned = cleaned.replace(/<p\b[^>]*>([\s\S]*?)<\/p>/gi, (match, inner) => {
-    const norm = stripHtml(inner).toLowerCase().replace(/\s+/g, ' ').trim();
-    if (!norm) return '';
-    if (seen.has(norm)) return '';
-    seen.add(norm);
-    return match;
+    const exact = stripHtml(inner).toLowerCase().replace(/\s+/g, ' ').trim();
+    const canonical = canonicalizeParagraph(inner);
+    if (!exact) return '';
+    if (seenExact.has(exact) || seenCanonical.has(canonical)) return '';
+    seenExact.add(exact);
+    seenCanonical.add(canonical);
+    return `<p>${stripHtml(inner)}</p>`;
   });
+
+  cleaned = cleaned.replace(/<h2[^>]*>\s*([^<]+)\s*<\/h2>\s*(?=<h2|$)/gi, '');
   return cleaned.replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -427,8 +444,8 @@ function invalidHeaderText(header: string) {
   const h = header.trim();
   if (!h) return true;
   if (h.split(/\s+/).length > 8) return true;
-  if (/\b(People|Real|Touch|Impact|Introduction|Conclusion|Relevance|Importance)\b/i.test(h)) return true;
-  if (/^(section|step|instruction|template|how this|what this means)/i.test(h)) return true;
+  if (/\b(People|Real|Touch|Impact|Introduction|Conclusion|Relevance|Importance|Overview|Summary)\b/i.test(h)) return true;
+  if (/^(section|step|instruction|template|how this|what this means|key discovery|main story|deeper insight|human impact|quick context|hook title|hook introduction)/i.test(h)) return true;
   return false;
 }
 
@@ -449,6 +466,7 @@ function qualityGate(content: string, metaDescription: string) {
     .every((c) => c <= 120);
   const imagesWithAlt = (content.match(/<img\b(?=[^>]*\bsrc=["'][^"']+["'])(?=[^>]*\balt=["'][^"']+["'])[^>]*>/gi) || []).length;
   const externalLinks = (content.match(/<a\b[^>]*href=["']https?:\/\/[^"']+["']/gi) || []).length;
+  const anchorCount = (content.match(/<a\b[^>]*href=/gi) || []).length;
   const imageSrcSafe = !/<img\b[^>]*src=["'][^"']*(?:github\.com|githubusercontent|\/automation\/)[^"']*["']/i.test(content);
 
   const checks = [
@@ -461,6 +479,7 @@ function qualityGate(content: string, metaDescription: string) {
     { label: 'At least 1 real image embedded with non-empty alt text', pass: imagesWithAlt >= 1, detail: `found=${imagesWithAlt}` },
     { label: 'Image src URLs contain no /automation/ or GitHub strings', pass: imageSrcSafe, detail: imageSrcSafe ? 'ok' : 'unsafe image src' },
     { label: 'No external source links exposed in body', pass: externalLinks === 0, detail: `found=${externalLinks}` },
+    { label: 'No article links injected into body', pass: anchorCount === 0, detail: `found=${anchorCount}` },
     { label: 'Meta description is present and 140-160 chars', pass: metaDescription.length >= 140 && metaDescription.length <= 160, detail: `len=${metaDescription.length}` },
     { label: 'Post closes with a question', pass: /\?$/.test(plain), detail: /\?$/.test(plain) ? 'ok' : 'missing ?' },
     { label: 'No paragraph exceeds 120 words', pass: paragraphWordCap, detail: paragraphWordCap ? 'ok' : 'paragraph over 120 words' },
@@ -487,21 +506,33 @@ function enforceParagraphLengthAndQuestion(content: string, topic: string) {
   return updated;
 }
 
-function sanitizeHeaders(content: string) {
-  let idx = 1;
+function buildEditorialFallbackHeadings(topic: string) {
+  const root = topic
+    .replace(/[:\-–—].*$/, '')
+    .replace(/\b(the|a|an)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const shortRoot = root.split(/\s+/).slice(0, 5).join(' ');
+  return [
+    `${shortRoot} Starts Below`,
+    `How The Hidden System Works`,
+    `Where Scientists See It Shift`,
+    `Why The Signals Conflict`,
+    `What It Changes For People`,
+    `The Question Beneath ${shortRoot.split(/\s+/)[0] || 'It'}`,
+  ];
+}
+
+function sanitizeHeaders(content: string, topic: string) {
+  const replacements = buildEditorialFallbackHeadings(topic);
+  let idx = 0;
   return String(content || '').replace(/<h2[^>]*>\s*([^<]+)\s*<\/h2>/gi, (_m, heading) => {
     const h = String(heading || '').trim();
     if (!invalidHeaderText(h)) return `<h2>${h}</h2>`;
-    const replacement = `Key Discovery ${idx++}`;
+    const replacement = replacements[Math.min(idx, replacements.length - 1)];
+    idx += 1;
     return `<h2>${replacement}</h2>`;
   });
-}
-
-function injectRequiredFactBlock(content: string) {
-  const factBlock = `<h2>Verified Data Points</h2>
-<p>In 1970, Soviet researchers began the Kola Superdeep Borehole near Zapolyarny on Russia’s Kola Peninsula, eventually reaching 12,262 meters (about 7.6 miles) by 1989, which is still the deepest human-made point on Earth.</p>
-<p>According to reports summarized by the Russian Academy of Sciences, MIT geophysics explainers, and later coverage in Science and Nature archives, core samples showed unexpectedly high porosity and water-bearing fractures at depth, while projected temperatures exceeded 180°C, making deeper drilling technically unmanageable with 1980s equipment.</p>`;
-  return `${content}${factBlock}`;
 }
 
 function contentOnlyGate(content: string) {
@@ -570,7 +601,7 @@ Do not include source URLs, "read another website" instructions, or citation sec
 If a fact cannot be confirmed, rewrite to a defensible general statement instead of adding placeholders.`;
 
     const draft = String(await generateText(prompt, niche) || '').trim();
-    const cleaned = scrubBannedPhrases(stripSourceSectionsAndUrls(draft)).replace(/\[FACT NEEDED\]/g, '[FACT NEEDED]');
+    const cleaned = removeExternalReferencesAndDuplicateParagraphs(scrubBannedPhrases(stripSourceSectionsAndUrls(draft))).replace(/\[FACT NEEDED\]/g, '[FACT NEEDED]');
     fallbackDraft = cleaned || fallbackDraft;
     if (!contentOnlyGate(cleaned)) continue;
     return cleaned;
@@ -579,25 +610,28 @@ If a fact cannot be confirmed, rewrite to a defensible general statement instead
   throw new Error('Failed to generate article draft.');
 }
 
-function buildFallbackArticle(topic: string, niche: string) {
+function buildFallbackArticle(topic: string, _niche: string) {
+  const root = topic.split(':')[0].trim();
   return `
-<h2>${topic.split(':')[0]} Is Rewriting Ice Forecasts</h2>
-<p>For ${niche} readers, this topic matters because hidden drainage channels under Antarctica can change how quickly glacier ice moves toward the coast. Field teams now treat basal water as an active control layer, not background noise, because pressure changes can alter flow over large ice corridors in short windows.</p>
-<p>The old assumption was that surface temperature trends alone could explain short-term shifts. Newer monitoring shows basal water routing can amplify or soften those shifts, which means forecast models must account for both climate forcing and subsurface flow behavior to stay credible.</p>
-<h2>What Teams Can Actually Measure</h2>
-<p>Modern monitoring combines satellite elevation records, GPS velocity tracks, and radar scans beneath the ice. In several Antarctic sectors, researchers mapped linked pathways spanning more than 100 kilometers, and drainage pulses have been observed moving at roughly 200 meters per hour during active episodes.</p>
-<p>Teams also track grounding-line response, where land ice begins to float, because this transition zone often reacts quickly to pressure changes upstream. Even when movement changes look modest day-to-day, they can accumulate into larger seasonal differences that matter for coastal planning.</p>
-<h2>Why The Behavior Looks Contradictory</h2>
-<p>Subglacial water does not produce one simple effect. Diffuse water can increase sliding and speed up motion, while organized channels can lower pressure and briefly stabilize some segments. That split behavior is why scientists focus on timing, geometry, and pressure cycles instead of single-cause explanations.</p>
-<p>This is also why policy teams need scenario-based planning instead of one-line predictions. A region that appears stable in one season can change quickly if channel structure reorganizes, especially during melt periods when hydraulic pressure and ocean-driven stress compound each other.</p>
-<h2>Hotspots Driving The Risk Conversation</h2>
-<p>Attention remains high around Thwaites Glacier, Pine Island Glacier, and connected systems feeding the Ross Ice Shelf. East Antarctic observations, including regions near Dome C and Lake Vostok, add context on how deep-pressure networks behave under different geological settings.</p>
-<p>These hotspots matter because they anchor many public conversations about sea-level timing. Scientists are not just tracking whether ice is moving, but how quickly uncertainty bands widen when water pathways reorganize. That uncertainty management is now a central part of risk communication.</p>
-<h2>Why This Is A 2026 Issue</h2>
-<p>Coastal planning and insurance decisions are being made right now. If subglacial routes reorganize quickly, sea-level risk ranges can widen faster than infrastructure timelines. Better near-term monitoring reduces surprise and gives cities more realistic windows for adaptation.</p>
-<p>For fast-growing coastal cities, this becomes a budget and governance issue as much as a science issue. Drainage risk, transport resilience, and housing policy all depend on whether planners can trust near-term projections when building projects expected to last decades.</p>
-<h2>Where Should We Push Next?</h2>
-<p>If hidden water can trigger rapid shifts in ice flow, what should be prioritized first: more polar monitoring hardware, faster coastal adaptation funding, or stricter planning buffers for exposed communities? Share your take in the comments and pass this to someone tracking climate risk.</p>
+<h2>${root} Starts Beneath The Surface</h2>
+<p>Antarctica can look motionless from a satellite image, but some of its most important movement begins in total darkness. Beneath major glaciers, pressurized meltwater can change the friction between ice and bedrock, altering how quickly huge sections of ice move toward the coast.</p>
+<p>That buried water is not a minor detail. In some parts of the ice sheet, drainage routes can connect inland basins to coastal outlets across distances greater than 100 kilometers, which means a shift deep below the surface can influence how stress moves through an entire glacier system.</p>
+<h2>Why The Ice Base Keeps Changing</h2>
+<p>Subglacial water forms when geothermal heat, pressure, and the friction of moving ice melt the glacier from below. Radar surveys, satellite altimetry, and GPS stations have shown that some Antarctic drainage systems fill and drain in pulses rather than staying stable from one season to the next.</p>
+<p>During active drainage events, researchers have measured water moving at roughly 200 meters per hour, and some glacier speed changes have appeared within about 72 hours of a major pulse. That is fast enough to matter for short-term ice modeling, not just long-range climate projections.</p>
+<p>Studies published in 2020 and 2023 helped push this issue into the spotlight by showing that changes at the glacier base can echo upward through hundreds of meters of ice. What happens out of sight can still leave a signal that satellites detect from orbit.</p>
+<h2>Where Scientists See The Shift</h2>
+<p>Much of the attention stays on Thwaites Glacier in West Antarctica, Pine Island Glacier near Pine Island Bay, and the ice streams feeding the Ross Ice Shelf. East Antarctica adds another piece of the puzzle through observations near Dome C and Lake Vostok, where deeper basal systems reveal how pressure behaves under very different terrain.</p>
+<p>Taken together, those locations show the same basic truth: the underside of the ice sheet is not passive. It behaves more like a changing plumbing network that can redirect pressure, reorganize flow, and complicate otherwise neat predictions about glacier behavior.</p>
+<p>Researchers working with NASA data and British Antarctic Survey field campaigns have reinforced that this is not a one-off curiosity. Similar patterns appearing in multiple Antarctic sectors suggest that hidden drainage is a structural part of the story, not background noise.</p>
+<h2>When More Water Does Less</h2>
+<p>The most surprising part is that more meltwater does not always mean faster ice loss. In some settings, a more organized drainage channel can move water efficiently enough to reduce lubrication and briefly slow local motion. In others, unstable routing allows pressure to build and pushes the ice forward faster.</p>
+<p>That is why the old year-by-year shorthand often falls apart. The real question is not whether water exists under the ice, but how that water is routed, how pressure builds, and when the system reorganizes.</p>
+<h2>Why This Matters Beyond Antarctica</h2>
+<p>Sea-level planning depends on how confidently scientists can estimate near-term change as well as long-term risk. If hidden drainage systems can widen the uncertainty around ice movement, that uncertainty can ripple into coastal engineering, insurance models, port upgrades, and public infrastructure budgets expected to last for decades.</p>
+<p>In practical terms, better polar monitoring can affect when a city raises a seawall, how an insurer prices flood exposure, or whether a planner assumes a narrow risk range or a much wider one. The rivers under Antarctic ice are far away, but the consequences of misunderstanding them may not stay there.</p>
+<h2>What Should Be Watched Next?</h2>
+<p>If these hidden rivers can either stabilize or destabilize glacier flow depending on how they reorganize, what deserves the closest watch next: faster field measurements, sharper public forecasts, or stronger coastal planning buffers, and is this a story more people should be talking about?</p>
 `;
 }
 
@@ -672,7 +706,7 @@ async function generateWorkersAiImageWithRetry(topic: string, niche: string, max
   throw new Error(`Workers AI image generation failed after ${maxAttempts} attempts: ${String(lastError?.message || lastError)}`);
 }
 
-async function createFinalBlogImageOrThrow(topic: string, niche: string, settings: any) {
+async function createFinalBlogImageOrThrow(topic: string, niche: string, settings: any, options?: { reuseVerifiedImage?: boolean; skipOverlay?: boolean }) {
   const githubPat = decryptSecret(settings.github_pat || '');
   const githubRepo = String(settings.github_repo || '').trim();
   const catboxHash = decryptSecret(settings.catbox_hash || '');
@@ -683,15 +717,13 @@ async function createFinalBlogImageOrThrow(topic: string, niche: string, setting
   let workersImage: Buffer;
   let sourceImageUrl = '';
   try {
+    if (options?.reuseVerifiedImage) throw new Error('reuse verified image requested');
     workersImage = await generateWorkersAiImageWithRetry(topic, niche, 6);
     assertRealGeneratedImage(workersImage, 'Workers AI image');
     const workersFilename = `workers-ai-${Date.now()}.png`;
     sourceImageUrl = await uploadToCatbox(workersImage, workersFilename);
   } catch (err: any) {
-    const status = Number(err?.response?.status || 0);
-    const looksRateLimited = status === 429 || /429|rate.?limit/i.test(String(err?.message || ''));
-    if (!looksRateLimited) throw err;
-    console.warn('[automation] Workers AI rate-limited; attempting recovery using most recent verified Workers AI source image from history.');
+    console.warn(`[automation] Workers AI image generation failed; attempting recovery from verified history: ${String(err?.message || err)}`);
     const supabase = getSupabase();
     const { data: recentPosts } = await supabase
       .from('posts')
@@ -720,15 +752,23 @@ async function createFinalBlogImageOrThrow(topic: string, niche: string, setting
 
   if (!/^https?:\/\/.+/i.test(sourceImageUrl)) throw new Error('Workers AI image upload URL is invalid.');
 
-  const sourceImagePath = `automation/incoming/workers-ai-${Date.now()}.png`;
-  await uploadBufferToGithub(githubRepo, githubPat, workersImage, sourceImagePath, `Upload Workers AI source image: ${topic}`);
+  let finalBuffer = workersImage;
+  if (!options?.skipOverlay) {
+    try {
+      const sourceImagePath = `automation/incoming/workers-ai-${Date.now()}.png`;
+      await uploadBufferToGithub(githubRepo, githubPat, workersImage, sourceImagePath, `Upload Workers AI source image: ${topic}`);
 
-  const correlationId = await dispatchTitleOverlayWorkflow(githubRepo, githubPat, sourceImageUrl, sourceImagePath, topic, catboxHash);
-  const overlayBuffer = await waitForOverlayArtifact(githubRepo, githubPat, correlationId);
-  assertRealGeneratedImage(overlayBuffer, 'Overlay output image');
+      const correlationId = await dispatchTitleOverlayWorkflow(githubRepo, githubPat, sourceImageUrl, sourceImagePath, topic, catboxHash);
+      const overlayBuffer = await waitForOverlayArtifact(githubRepo, githubPat, correlationId);
+      assertRealGeneratedImage(overlayBuffer, 'Overlay output image');
+      finalBuffer = overlayBuffer;
+    } catch (overlayError: any) {
+      console.warn(`[automation] Overlay workflow unavailable; publishing with verified source image instead: ${String(overlayError?.message || overlayError)}`);
+    }
+  }
 
   const finalFilename = `final-overlay-${Date.now()}.png`;
-  const finalImageUrl = await uploadToCatbox(overlayBuffer, finalFilename);
+  const finalImageUrl = await uploadToCatbox(finalBuffer, finalFilename);
   if (!/^https?:\/\/.+/i.test(finalImageUrl)) throw new Error('Final overlay image upload URL is invalid.');
   return { sourceImageUrl, finalImageUrl };
 }
@@ -853,27 +893,35 @@ Read the full article in the comments 👇
 ${hashtagBase}`;
 }
 
-async function publishToBlogger(blogId: string, title: string, content: string, options?: { publishAt?: string }) {
-  const accessToken = await getBloggerAccessToken();
-  const payload: any = { kind: 'blogger#post', title, content };
-  if (options?.publishAt) payload.published = options.publishAt;
+type BloggerAuthBundle = {
+  accessToken: string;
+  tokenType: string;
+  expiresIn: number;
+  refreshedAt: string;
+};
 
-  const res = await axios.post(
-    `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts`,
-    payload,
-    outboundConfig({ headers: { Authorization: `Bearer ${accessToken}` } })
-  );
-  return res.data;
+async function loadBloggerOAuthCredentials() {
+  const settings = await getSettings();
+  const clientId = decryptSecret(settings.blogger_client_id);
+  const clientSecret = decryptSecret(settings.blogger_client_secret);
+  const refreshToken = decryptSecret(settings.blogger_refresh_token);
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error('Blogger OAuth credentials are missing in Supabase settings.');
+  }
+
+  return { clientId, clientSecret, refreshToken };
 }
 
-async function getBloggerAccessToken() {
-  const settings = await getSettings();
+async function refreshBloggerAccessToken() {
+  const credentials = await loadBloggerOAuthCredentials();
   const body = new URLSearchParams({
-    client_id: decryptSecret(settings.blogger_client_id),
-    client_secret: decryptSecret(settings.blogger_client_secret),
-    refresh_token: decryptSecret(settings.blogger_refresh_token),
-    grant_type: 'refresh_token'
+    client_id: credentials.clientId,
+    client_secret: credentials.clientSecret,
+    refresh_token: credentials.refreshToken,
+    grant_type: 'refresh_token',
   });
+
   const tokenRes = await axios.post(
     'https://oauth2.googleapis.com/token',
     body.toString(),
@@ -882,24 +930,63 @@ async function getBloggerAccessToken() {
       timeout: 30000,
     }),
   );
-  return tokenRes.data.access_token;
+
+  const accessToken = String(tokenRes.data?.access_token || '').trim();
+  if (!accessToken) {
+    throw new Error('Google OAuth did not return an access token for Blogger.');
+  }
+
+  return {
+    accessToken,
+    tokenType: String(tokenRes.data?.token_type || 'Bearer'),
+    expiresIn: Number(tokenRes.data?.expires_in || 0),
+    refreshedAt: new Date().toISOString(),
+  } satisfies BloggerAuthBundle;
 }
 
-async function fetchBloggerPost(blogId: string, postId: string) {
-  const accessToken = await getBloggerAccessToken();
-  const res = await axios.get(
-    `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts/${postId}`,
-    outboundConfig({ headers: { Authorization: `Bearer ${accessToken}` } })
+function bloggerAuthHeaders(bundle: BloggerAuthBundle) {
+  return { Authorization: `${bundle.tokenType || 'Bearer'} ${bundle.accessToken}` };
+}
+
+async function createVerifiedBloggerClient(blogId: string) {
+  const auth = await refreshBloggerAccessToken();
+  const verifyRes = await axios.get(
+    `https://www.googleapis.com/blogger/v3/blogs/${blogId}`,
+    outboundConfig({ headers: bloggerAuthHeaders(auth), timeout: 30000 }),
+  );
+
+  return {
+    auth,
+    blog: verifyRes.data,
+    headers: bloggerAuthHeaders(auth),
+  };
+}
+
+async function publishToBlogger(blogId: string, title: string, content: string, auth: BloggerAuthBundle, options?: { publishAt?: string }) {
+  const payload: any = { kind: 'blogger#post', title, content };
+  if (options?.publishAt) payload.published = options.publishAt;
+
+  const res = await axios.post(
+    `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts`,
+    payload,
+    outboundConfig({ headers: bloggerAuthHeaders(auth) })
   );
   return res.data;
 }
 
-async function updateBloggerPost(blogId: string, postId: string, title: string, content: string) {
-  const accessToken = await getBloggerAccessToken();
+async function fetchBloggerPost(blogId: string, postId: string, auth: BloggerAuthBundle) {
+  const res = await axios.get(
+    `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts/${postId}`,
+    outboundConfig({ headers: bloggerAuthHeaders(auth) })
+  );
+  return res.data;
+}
+
+async function updateBloggerPost(blogId: string, postId: string, title: string, content: string, auth: BloggerAuthBundle) {
   const res = await axios.put(
     `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts/${postId}`,
     { kind: 'blogger#post', id: postId, title, content },
-    outboundConfig({ headers: { Authorization: `Bearer ${accessToken}` } })
+    outboundConfig({ headers: bloggerAuthHeaders(auth) })
   );
   return res.data;
 }
@@ -909,6 +996,8 @@ function hasVisibleUrlsOrSources(content: string) {
   if (/\b(?:sources?|references?|citations?)\b/i.test(plain)) return true;
   if (/https?:\/\/\S+/i.test(plain)) return true;
   if (/\bwww\.\S+/i.test(plain)) return true;
+  if (/Related Reads|read another website|for a current reference|another useful scientific index|if you missed our earlier posts/i.test(plain)) return true;
+  if (/<a\b[^>]*href=/i.test(content)) return true;
   return false;
 }
 
@@ -920,38 +1009,12 @@ function buildScheduleMetadataStatus(metadata: any, status: string) {
   };
 }
 
-async function fetchRelatedInternalLinks(blogId: string, topic: string, limit = 3) {
-  const accessToken = await getBloggerAccessToken();
-  const res = await axios.get(
-    `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts?fetchBodies=false&maxResults=20`,
-    outboundConfig({ headers: { Authorization: `Bearer ${accessToken}` }, timeout: 30000 }),
-  );
-  const words = normalizeTopicText(topic).split(' ').filter((w) => w.length > 3);
-  const items = (res.data?.items || []) as any[];
-  const ranked = items
-    .map((item) => {
-      const title = String(item?.title || '');
-      const score = words.filter((w) => normalizeTopicText(title).includes(w)).length;
-      return { title, url: String(item?.url || ''), score };
-    })
-    .filter((x) => x.url && x.score >= 1)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-  if (ranked.length >= 2) return ranked;
-  return items
-    .map((item) => ({ title: String(item?.title || ''), url: String(item?.url || ''), score: 0 }))
-    .filter((x) => x.url)
-    .slice(0, limit);
+async function fetchRelatedInternalLinks(_blogId: string, _topic: string, _limit = 3) {
+  return [];
 }
 
-function injectInternalLinks(content: string, links: Array<{ title: string; url: string }>) {
-  const fallbackLinks = [
-    { title: 'Unveiled: The Magical Worlds of Bioluminescent Bays', url: 'https://strangefacthub.blogspot.com/2026/03/unveiled-magical-worlds-of.html' },
-    { title: 'Unlock the Magical Glow', url: 'https://strangefacthub.blogspot.com/2026/03/unlock-magical-glow-exploring-worlds.html' },
-  ];
-  const chosen = (links && links.length ? links : fallbackLinks).slice(0, 3);
-  const anchors = chosen.map((link) => `<li><a href="${link.url}" target="_blank" rel="noopener">${link.title}</a></li>`).join('');
-  return `${content}<h3>Related Reads on Strange Fact Hub</h3><ul>${anchors}</ul>`;
+function injectInternalLinks(content: string, _links: Array<{ title: string; url: string }>) {
+  return content;
 }
 
 function buildMetaDescription(title: string, content: string) {
@@ -960,7 +1023,7 @@ function buildMetaDescription(title: string, content: string) {
   return base.length < 140 ? `${base} Discover the latest data and what it means now.`.slice(0, 160) : base;
 }
 
-function injectSeoMetaTags(title: string, content: string, imageUrl: string) {
+function injectSeoMetaTags(title: string, content: string, imageUrl: string, blogName: string) {
   const metaDescription = buildMetaDescription(title, content);
   const safeTitle = title.replace(/"/g, '&quot;');
   const safeDescription = metaDescription.replace(/"/g, '&quot;');
@@ -970,7 +1033,7 @@ function injectSeoMetaTags(title: string, content: string, imageUrl: string) {
     "@type": "Article",
     "headline": title,
     "datePublished": publishedAt,
-    "author": { "@type": "Person", "name": "Strange Fact Hub" },
+    "author": { "@type": "Organization", "name": blogName },
   };
   const block = `
 <meta name="description" content="${safeDescription}" />
@@ -1116,9 +1179,12 @@ export async function runBlogAutomation(scheduleId: string) {
     const forcedTopic = String((schedule?.metadata as any)?.forced_topic || '').trim() || process.env.FORCED_TOPIC || '';
     const discoveredTopic = forcedTopic || await pickUniqueTrendingTopic(supabase, niche);
     const topic = forcedTopic || await rewriteToViralTitle(discoveredTopic, niche);
+    const forceFallbackArticle = Boolean((schedule?.metadata as any)?.force_fallback_article);
+    const reuseVerifiedImage = Boolean((schedule?.metadata as any)?.reuse_verified_image);
+    const skipImageOverlay = Boolean((schedule?.metadata as any)?.skip_image_overlay);
     let content = '';
     try {
-      content = await generateCleanCompleteArticle(topic, niche);
+      content = forceFallbackArticle ? buildFallbackArticle(topic, niche) : await generateCleanCompleteArticle(topic, niche);
     } catch (contentError: any) {
       const status = Number(contentError?.response?.status || 0);
       if (status === 429) {
@@ -1131,15 +1197,14 @@ export async function runBlogAutomation(scheduleId: string) {
     if (looksTruncated(content)) {
       throw new Error('Generated article failed completeness/structure validation.');
     }
-    const { sourceImageUrl, finalImageUrl } = await createFinalBlogImageOrThrow(topic, niche, settings);
+    const { sourceImageUrl, finalImageUrl } = await createFinalBlogImageOrThrow(topic, niche, settings, { reuseVerifiedImage, skipOverlay: skipImageOverlay });
     const imageAlt = `${topic} - AI generated cover image`;
     const imageBlock = `<img src="${finalImageUrl}" alt="${imageAlt.replace(/"/g, '&quot;')}" style="display:block;width:100%;max-width:1200px;height:auto;margin:12px auto;object-fit:cover;" /><br/>`;
 
     const cleanedArticle = removeExternalReferencesAndDuplicateParagraphs(content);
-    const withFacts = injectRequiredFactBlock(`${imageBlock}${cleanedArticle}`);
-    const sanitizedHeaders = sanitizeHeaders(withFacts);
+    const sanitizedHeaders = sanitizeHeaders(`${imageBlock}${cleanedArticle}`, topic);
     const normalizedBody = enforceParagraphLengthAndQuestion(sanitizedHeaders, topic);
-    const seoInjected = injectSeoMetaTags(topic, normalizedBody, finalImageUrl);
+    const seoInjected = injectSeoMetaTags(topic, normalizedBody, finalImageUrl, account.name);
     const gate = qualityGate(seoInjected.html, seoInjected.metaDescription);
     if (!gate.pass) {
       throw new Error(`Quality gate failed: ${gate.checks.filter((c) => !c.pass).map((c) => `${c.label} (${c.detail})`).join('; ')}`);
@@ -1149,17 +1214,19 @@ export async function runBlogAutomation(scheduleId: string) {
       ? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
       : undefined;
 
-    const bloggerPost = await publishToBlogger(account.blogger_id, topic, seoInjected.html, { publishAt });
+    const bloggerClient = await createVerifiedBloggerClient(account.blogger_id);
+    console.log(`[automation] Refreshed Blogger access token for blog ${account.blogger_id}; expires_in=${bloggerClient.auth.expiresIn}s; verified_blog=${bloggerClient.blog?.name || account.name}`);
+    const bloggerPost = await publishToBlogger(account.blogger_id, topic, seoInjected.html, bloggerClient.auth, { publishAt });
 
     if (!publishAt) {
-      const fetched = await fetchBloggerPost(account.blogger_id, bloggerPost.id);
+      const fetched = await fetchBloggerPost(account.blogger_id, bloggerPost.id, bloggerClient.auth);
       const fetchedContent = String(fetched?.content || '');
       if (hasVisibleUrlsOrSources(fetchedContent) || looksTruncated(fetchedContent)) {
-        const repairedBody = stripSourceSectionsAndUrls(fetchedContent);
+        const repairedBody = enforceParagraphLengthAndQuestion(sanitizeHeaders(removeExternalReferencesAndDuplicateParagraphs(stripSourceSectionsAndUrls(fetchedContent)), topic), topic);
         if (looksTruncated(repairedBody)) {
           throw new Error('Published post failed cleanliness/completeness verification.');
         }
-        await updateBloggerPost(account.blogger_id, bloggerPost.id, topic, repairedBody);
+        await updateBloggerPost(account.blogger_id, bloggerPost.id, topic, repairedBody, bloggerClient.auth);
       }
     }
 
