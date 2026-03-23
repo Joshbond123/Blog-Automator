@@ -542,9 +542,9 @@ async function startServer() {
   app.get("/api/schedules", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const { data, error } = await supabase.from("schedules").select("*");
+      const { data, error } = await supabase.from("schedules").select("*").order("created_at", { ascending: false });
       if (error) return res.status(500).json({ error: error.message });
-      res.json(data);
+      res.json(data || []);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -553,7 +553,19 @@ async function startServer() {
   app.post("/api/schedules", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const { data, error } = await supabase.from("schedules").insert(req.body).select().single();
+      const body = req.body || {};
+      const row: any = {
+        channel: body.channel ?? body.type ?? "blog",
+        target_id: body.target_id,
+        schedule_time: body.schedule_time ?? body.posting_time ?? "12:00",
+        timezone: body.timezone ?? "UTC",
+        is_enabled: body.is_enabled ?? body.active ?? true,
+        metadata: body.metadata ?? {},
+      };
+      if (!row.target_id) {
+        return res.status(400).json({ error: "target_id is required" });
+      }
+      const { data, error } = await supabase.from("schedules").insert(row).select().single();
       if (error) return res.status(500).json({ error: error.message });
       res.json(data);
     } catch (err: any) {
@@ -561,16 +573,17 @@ async function startServer() {
     }
   });
 
-
   app.patch("/api/schedules/:id", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const payload = {
-        posting_time: req.body?.posting_time,
-        target_id: req.body?.target_id,
-        active: req.body?.active,
-      } as any;
-      Object.keys(payload).forEach((k) => payload[k] === undefined && delete payload[k]);
+      const body = req.body || {};
+      const payload: any = {};
+      if (body.schedule_time !== undefined) payload.schedule_time = body.schedule_time;
+      if (body.posting_time !== undefined) payload.schedule_time = body.posting_time;
+      if (body.target_id !== undefined) payload.target_id = body.target_id;
+      if (body.is_enabled !== undefined) payload.is_enabled = body.is_enabled;
+      if (body.active !== undefined) payload.is_enabled = body.active;
+      if (body.timezone !== undefined) payload.timezone = body.timezone;
 
       const { data, error } = await supabase.from("schedules").update(payload).eq("id", req.params.id).select().single();
       if (error) return res.status(500).json({ error: error.message });
@@ -600,7 +613,7 @@ async function startServer() {
       
       if (!schedule) return res.status(404).json({ error: "Schedule not found" });
 
-      if (schedule.type === "blog") {
+      if (schedule.channel === "blog") {
         runBlogAutomation(id).catch(console.error);
       } else {
         runVideoAutomation(id).catch(console.error);
@@ -619,7 +632,7 @@ async function startServer() {
       const { count: totalPosts } = await supabase.from("posts").select("*", { count: "exact", head: true });
       const today = new Date().toISOString().split("T")[0];
       const { count: publishedToday } = await supabase.from("posts").select("*", { count: "exact", head: true }).gte("published_at", today);
-      const { count: activeSchedules } = await supabase.from("schedules").select("*", { count: "exact", head: true }).eq("active", true);
+      const { count: activeSchedules } = await supabase.from("schedules").select("*", { count: "exact", head: true }).eq("is_enabled", true);
 
       res.json({
         totalPosts: totalPosts || 0,
@@ -669,13 +682,13 @@ async function startServer() {
       const { data: schedules } = await supabase
         .from("schedules")
         .select("*")
-        .eq("active", true)
-        .eq("posting_time", currentTime);
+        .eq("is_enabled", true)
+        .like("schedule_time", `${currentTime}%`);
 
       if (schedules) {
         for (const schedule of schedules) {
           console.log(`Triggering schedule ${schedule.id} at ${currentTime}`);
-          if (schedule.type === "blog") {
+          if (schedule.channel === "blog") {
             runBlogAutomation(schedule.id).catch(console.error);
           } else {
             runVideoAutomation(schedule.id).catch(console.error);
