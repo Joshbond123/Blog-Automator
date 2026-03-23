@@ -50,13 +50,20 @@ export interface FacebookPage {
 
 export interface Schedule {
   id: string;
-  type: 'blog' | 'video';
+  channel: 'blog' | 'video';
   target_id: string; // blogger_account_id or facebook_page_id
-  posting_time: string; // HH:mm
-  active: boolean;
+  schedule_time: string; // HH:mm or HH:mm:ss
+  timezone: string;
+  is_enabled: boolean;
+  metadata?: {
+    last_executed_at?: string;
+    last_execution_status?: string;
+    created_at?: string;
+    created_by?: string;
+    [key: string]: any;
+  };
   created_at: string;
-  last_execution_status?: string;
-  last_executed_at?: string;
+  updated_at?: string;
 }
 
 export interface Post {
