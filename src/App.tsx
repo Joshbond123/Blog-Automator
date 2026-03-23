@@ -497,7 +497,8 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
   const [showAdd, setShowAdd] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
 
-  const [newSchedule, setNewSchedule] = useState({ target_id: '', posting_time: '12:00' });
+  const [newSchedule, setNewSchedule] = useState({ target_id: '', schedule_time: '12:00' });
+  const [addError, setAddError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -510,9 +511,9 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
         fetch('/api/blogger-accounts').then(r => r.ok ? r.json() : []),
         fetch('/api/facebook-pages').then(r => r.ok ? r.json() : [])
       ]);
-      setSchedules(schRes.filter((s: Schedule) => s.type === type));
-      setAccounts(accRes);
-      setFbPages(fbRes);
+      setSchedules((schRes || []).filter((s: Schedule) => s.channel === type));
+      setAccounts(accRes || []);
+      setFbPages(fbRes || []);
     } catch (err) {
       console.error(err);
     } finally {
@@ -522,18 +523,31 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
+    setAddError(null);
     try {
       const res = await fetch('/api/schedules', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...newSchedule, type, active: true })
+        body: JSON.stringify({
+          channel: type,
+          target_id: newSchedule.target_id,
+          schedule_time: newSchedule.schedule_time,
+          timezone: 'UTC',
+          is_enabled: true,
+          metadata: {}
+        })
       });
       if (res.ok) {
         setShowAdd(false);
+        setNewSchedule({ target_id: '', schedule_time: '12:00' });
         fetchData();
+      } else {
+        const err = await res.json().catch(() => ({ error: 'Failed to create schedule' }));
+        setAddError(err.error || 'Failed to create schedule');
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      setAddError(err.message || 'Network error');
     }
   };
 
@@ -546,15 +560,14 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
     }
   };
 
-
   const handleEdit = async (schedule: Schedule) => {
-    const posting_time = prompt('Update daily posting time (HH:mm)', schedule.posting_time) || schedule.posting_time;
+    const schedule_time = prompt('Update daily posting time (HH:mm)', schedule.schedule_time.slice(0, 5)) || schedule.schedule_time;
     const target_id = schedule.target_id;
     try {
       const res = await fetch(`/api/schedules/${schedule.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ posting_time, target_id })
+        body: JSON.stringify({ schedule_time, target_id })
       });
       if (res.ok) fetchData();
     } catch (err) {
@@ -623,15 +636,21 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                     <h4 className="text-white font-bold">{target?.name || 'Unknown Target'}</h4>
                     <div className="flex items-center gap-3 mt-1">
                       <span className="flex items-center gap-1 text-zinc-500 text-sm">
-                        <Clock className="w-3 h-3" /> {s.posting_time} Daily
+                        <Clock className="w-3 h-3" /> {s.schedule_time?.slice(0, 5)} Daily
                       </span>
                       <span className="w-1 h-1 bg-zinc-700 rounded-full" />
                       <span className="text-indigo-400 text-xs font-bold uppercase tracking-wider">
                         {type === 'blog' ? (target as BloggerAccount)?.niche : 'Video Content'}
                       </span>
+                      <span className={cn(
+                        "text-xs font-semibold px-2 py-0.5 rounded-full",
+                        s.is_enabled ? "bg-green-500/10 text-green-400" : "bg-zinc-700/50 text-zinc-500"
+                      )}>
+                        {s.is_enabled ? 'Active' : 'Paused'}
+                      </span>
                     </div>
                     <p className="text-[11px] text-zinc-600 mt-2">Created: {new Date(s.created_at).toLocaleString()}</p>
-                    <p className="text-[11px] mt-1 text-zinc-500">Last Run: {s.last_execution_status || 'Not executed yet'}</p>
+                    <p className="text-[11px] mt-1 text-zinc-500">Last Run: {s.metadata?.last_execution_status || 'Not executed yet'}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
@@ -690,6 +709,11 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                 </button>
               </div>
               <form onSubmit={handleAdd} className="p-6 space-y-6">
+                {addError && (
+                  <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-sm">
+                    {addError}
+                  </div>
+                )}
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-zinc-400">Select {type === 'blog' ? 'Blogger Account' : 'Facebook Page'}</label>
                   <select 
@@ -704,14 +728,17 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                       : fbPages.map(p => <option key={p.id} value={p.id}>{p.name}</option>)
                     }
                   </select>
+                  {type === 'blog' && accounts.length === 0 && (
+                    <p className="text-xs text-amber-400 mt-1">No Blogger accounts configured. Add one first.</p>
+                  )}
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-zinc-400">Daily Posting Time</label>
+                  <label className="text-sm font-medium text-zinc-400">Daily Posting Time (UTC)</label>
                   <input 
                     required
                     type="time" 
-                    value={newSchedule.posting_time}
-                    onChange={(e) => setNewSchedule({ ...newSchedule, posting_time: e.target.value })}
+                    value={newSchedule.schedule_time}
+                    onChange={(e) => setNewSchedule({ ...newSchedule, schedule_time: e.target.value })}
                     className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-colors"
                   />
                 </div>
