@@ -26,7 +26,7 @@ function outboundConfig(extra: Record<string, any> = {}) {
 }
 
 const DEFAULT_CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-const DEFAULT_CF_IMAGE_MODEL = '@cf/black-forest-labs/flux-1-schnell';
+const DEFAULT_CF_IMAGE_MODEL = '@cf/black-forest-labs/flux-2-dev';
 
 type KeyUsage = {
   key: string;
@@ -444,8 +444,13 @@ function invalidHeaderText(header: string) {
   const h = header.trim();
   if (!h) return true;
   if (h.split(/\s+/).length > 8) return true;
+  // Generic template/AI-sounding headers
   if (/\b(People|Real|Touch|Impact|Introduction|Conclusion|Relevance|Importance|Overview|Summary)\b/i.test(h)) return true;
   if (/^(section|step|instruction|template|how this|what this means|key discovery|main story|deeper insight|human impact|quick context|hook title|hook introduction)/i.test(h)) return true;
+  // Common AI-generated filler headers that are not topic-specific
+  if (/^(Why It Matters|What'?s Next|The Big Picture|Breaking It Down|What We Know|What This Means|Key Takeaway|Final Thoughts|In Summary|The Bottom Line|Going Forward|Looking Ahead|The Impact|The Basics|The Details|The Facts|The Story|The Science|The Research|The Evidence|The Context|The Background|The History|The Future|The Problem|The Solution|The Answer|The Question|The Truth|The Reality|The Result|The Findings|The Implications|The Significance)$/i.test(h)) return true;
+  // Very short generic headers that are not topic-specific (less than 2 words that are too vague)
+  if (h.split(/\s+/).length <= 2 && /^(Alert|Overview|Update|Analysis|Report|Story|Facts|News|Info|Details|Basics|Context|Background|History|Future|Problem|Solution|Answer|Question|Truth|Reality|Result|Findings|Impact|Significance|Conclusion|Summary|Introduction)$/i.test(h)) return true;
   return false;
 }
 
@@ -507,19 +512,23 @@ function enforceParagraphLengthAndQuestion(content: string, topic: string) {
 }
 
 function buildEditorialFallbackHeadings(topic: string) {
-  const root = topic
-    .replace(/[:\-–—].*$/, '')
-    .replace(/\b(the|a|an)\b/gi, ' ')
+  // Extract meaningful keywords from the topic for topic-specific headers
+  const words = topic
+    .replace(/[:\-–—]/g, ' ')
+    .replace(/\b(the|a|an|and|or|in|on|of|to|is|are|was|were|that|this|it|with|for|by|at)\b/gi, ' ')
     .replace(/\s+/g, ' ')
-    .trim();
-  const shortRoot = root.split(/\s+/).slice(0, 5).join(' ');
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w.length > 3);
+  const key = words.slice(0, 3).join(' ') || topic.split(/\s+/).slice(0, 3).join(' ');
+  const first = words[0] || 'It';
   return [
-    `${shortRoot} Starts Below`,
-    `How The Hidden System Works`,
-    `Where Scientists See It Shift`,
-    `Why The Signals Conflict`,
-    `What It Changes For People`,
-    `The Question Beneath ${shortRoot.split(/\s+/)[0] || 'It'}`,
+    `How ${key} Actually Works`,
+    `The Data Behind ${first}`,
+    `Where ${first} Is Changing Fast`,
+    `What ${key} Gets Wrong`,
+    `${first} in ${new Date().getFullYear()}: The Numbers`,
+    `The Question ${first} Can't Answer Yet`,
   ];
 }
 
@@ -577,10 +586,19 @@ FACTS REQUIRED:
 - At least 1 named researcher, scientist, or institution
 - At least 1 reference to a study or report (include year)
 
-SECTION HEADERS:
-- Must be journalistic, topic-specific, and punchy
-- Maximum 7 words
-- Never use: Introduction, Conclusion, Impact, Real People, Relevance, How This, What This Means
+SECTION HEADERS — CRITICAL RULES:
+- MUST reference the specific topic, place, discovery, or person in the article — generic headers are forbidden
+- Maximum 7 words per header
+- ABSOLUTELY FORBIDDEN headers (do not use these or anything similar):
+  "Why It Matters", "What's Next", "The Big Picture", "Breaking It Down", "What We Know",
+  "Introduction", "Conclusion", "Impact", "Overview", "Summary", "Analysis", "The Details",
+  "The Facts", "The Story", "The Science", "Key Takeaway", "Final Thoughts", "Going Forward",
+  "The Bottom Line", "The Truth", "Looking Ahead", "The Basics", "News Alert", "News Engine",
+  "Global Reach", "Hidden Secrets", "The Research", "The Findings"
+- GOOD header examples for a topic about "Antarctic Ice":
+  "Thwaites Glacier's Hidden Drainage System", "When More Meltwater Slows The Ice",
+  "Scientists Track The Ross Ice Shelf", "What 72 Hours Under Ice Revealed"
+- Every header must feel like it belongs only to THIS article — not reusable for any other topic
 
 LENGTH: 950–1,150 words exactly. No more.
 `;
@@ -644,7 +662,7 @@ async function generateImage(prompt: string) {
     const res = await axios.post(
       `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/${imageModel}`,
       { prompt },
-      outboundConfig({ headers: { Authorization: `Bearer ${selected.key}` }, responseType: 'arraybuffer', timeout: 45000 })
+      outboundConfig({ headers: { Authorization: `Bearer ${selected.key}` }, responseType: 'arraybuffer', timeout: 120000 })
     );
 
     await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, true);
@@ -683,11 +701,14 @@ function assertRealGeneratedImage(buffer: Buffer, label: string) {
 
 function buildWorkersAiImagePrompt(topic: string, niche: string) {
   return [
-    `Create a high-impact, viral-style blog hero image about: ${topic}.`,
-    `Niche context: ${niche}.`,
-    'Photorealistic or cinematic editorial style, dramatic composition, strong contrast, modern color grading.',
-    'No watermarks, no text, no logos, no UI elements.',
-    'Image must be suitable as a professional blog cover image with room for title overlay in upper or center area.',
+    `Create a stunning, photorealistic blog cover photograph about: ${topic}.`,
+    `Niche: ${niche}.`,
+    'Style: cinematic documentary photography, dramatic natural lighting, rich depth of field, high-detail macro or wide-angle composition.',
+    'The image must be completely free of ANY text, letters, numbers, words, captions, watermarks, logos, UI elements, labels, or signs.',
+    'IMPORTANT: Do NOT render any written characters or text of any kind anywhere in the image.',
+    'The scene should be visually compelling on its own — no overlay text needed.',
+    'Leave the upper third and lower third of the image slightly less busy to allow for a title text overlay.',
+    'Think National Geographic cover quality: real-world environments, genuine-looking subjects, vivid but natural colors.',
   ].join(' ');
 }
 
@@ -1051,10 +1072,35 @@ async function pickUniqueTrendingTopic(supabase: any, niche: string) {
 }
 
 async function rewriteToViralTitle(topic: string, niche: string) {
-  return generateText(
-    `Rewrite this topic into one professional, click-worthy, viral title. Keep it faithful and natural. Topic: ${topic}`,
+  const raw = await generateText(
+    `You are a headline editor at a major digital publication. Rewrite the topic below into ONE punchy, human-sounding blog headline.
+
+STRICT RULES:
+- Maximum 12 words
+- Must sound like a real journalist wrote it — natural, specific, conversational
+- NEVER start with: "Breaking News", "Alert", "Exclusive", "Revealed", "Discover", "Uncover", "Hidden", "Secrets", "Ultimate", "The Truth About", "You Won't Believe", "Top [number]", "Shocking"
+- NEVER use colons followed by generic phrases like "What You Need to Know" or "Here's Why"
+- NO question marks in the title
+- NO ALL CAPS words
+- NO hashtags or emojis
+- Be direct and specific about the actual subject matter
+- Sound like something The Atlantic or BBC News would publish
+- Return ONLY the headline. No quotes. No explanation.
+
+Topic: ${topic}`,
     niche,
   );
+  // Strip any remaining AI-generated prefixes or formatting
+  let title = String(raw || topic).trim()
+    .replace(/^["']|["']$/g, '')
+    .replace(/^(Breaking News[\s:]*|Alert[\s:]*|Exclusive[\s:]*|BREAKING[\s:]*)/i, '')
+    .replace(/^(Shocking[\s:]*|Revealed[\s:]*|Uncover[\s:]*|Discover[\s:]*)/i, '')
+    .trim();
+  // If the result looks bad (too long, empty, or still has AI junk), fall back to the original topic
+  if (!title || title.split(/\s+/).length > 16 || /^(Breaking|Alert|Uncover|Secret|Ultimate|Shocking)/i.test(title)) {
+    title = topic;
+  }
+  return title;
 }
 
 function deterministicTopicHashtags(topic: string) {
@@ -1191,9 +1237,13 @@ async function createVerifiedBloggerClient(blogId: string) {
   };
 }
 
-async function publishToBlogger(blogId: string, title: string, content: string, auth: BloggerAuthBundle, options?: { publishAt?: string }) {
+async function publishToBlogger(blogId: string, title: string, content: string, auth: BloggerAuthBundle, options?: { publishAt?: string; labels?: string[] }) {
   const payload: any = { kind: 'blogger#post', title, content };
   if (options?.publishAt) payload.published = options.publishAt;
+  if (options?.labels && options.labels.length > 0) {
+    // Strip '#' prefix for Blogger labels (tags)
+    payload.labels = options.labels.map((l) => l.replace(/^#/, '').trim()).filter(Boolean);
+  }
 
   const res = await axios.post(
     `https://www.googleapis.com/blogger/v3/blogs/${blogId}/posts`,
@@ -1434,18 +1484,39 @@ export async function runBlogAutomation(scheduleId: string) {
       throw new Error('Generated article failed completeness/structure validation.');
     }
     const cleanedArticle = removeExternalReferencesAndDuplicateParagraphs(content);
+
+    // Generate hashtags — these go ONLY to Blogger labels, NEVER into the article body
     const hashtags = await generateViralHashtags(topic, niche, cleanedArticle);
-    const articleWithHashtags = injectHashtagBlock(cleanedArticle, hashtags);
+
+    // Strict pre-publish content validation
+    const articlePlain = stripHtml(cleanedArticle);
+    if (/#[A-Za-z0-9]+/.test(articlePlain)) {
+      throw new Error('Pre-publish validation failed: article body contains hashtags. Hashtags must only appear as Blogger labels.');
+    }
+    if (/^(Breaking News|Breaking:|Alert:|Exclusive:|BREAKING)/i.test(topic.trim())) {
+      throw new Error(`Pre-publish validation failed: title "${topic}" uses forbidden AI-generated prefix.`);
+    }
+    if (topic.split(/\s+/).length > 18) {
+      throw new Error(`Pre-publish validation failed: title too long (${topic.split(/\s+/).length} words). Max 18.`);
+    }
+
     const { sourceImageUrl, finalImageUrl } = await createFinalBlogImageOrThrow(topic, niche, settings);
-    const imageAlt = `${topic} - AI generated cover image`;
+    const imageAlt = `${topic} - cover image`;
     const imageBlock = `<img src="${finalImageUrl}" alt="${imageAlt.replace(/"/g, '&quot;')}" style="display:block;width:100%;max-width:1200px;height:auto;margin:12px auto;object-fit:cover;" /><br/>`;
 
-    const sanitizedHeaders = sanitizeHeaders(`${imageBlock}${articleWithHashtags}`, topic);
+    // Build final article WITHOUT hashtags in body — they go only to Blogger labels
+    const sanitizedHeaders = sanitizeHeaders(`${imageBlock}${cleanedArticle}`, topic);
     const normalizedBody = enforceParagraphLengthAndQuestion(sanitizedHeaders, topic);
     const seoInjected = injectSeoMetaTags(topic, normalizedBody, finalImageUrl, account.name);
     const gate = qualityGate(seoInjected.html, seoInjected.metaDescription);
     if (!gate.pass) {
       throw new Error(`Quality gate failed: ${gate.checks.filter((c) => !c.pass).map((c) => `${c.label} (${c.detail})`).join('; ')}`);
+    }
+
+    // Final check: confirm no hashtags leaked into the publishable body
+    const publishablePlain = stripHtml(seoInjected.html);
+    if (/#[A-Za-z0-9]+/.test(publishablePlain)) {
+      throw new Error('Final validation failed: hashtags found in publishable body. Aborting to prevent content pollution.');
     }
 
     const publishAt = topic.toLowerCase().includes('deepest hole ever drilled')
@@ -1454,7 +1525,8 @@ export async function runBlogAutomation(scheduleId: string) {
 
     const bloggerClient = await createVerifiedBloggerClient(account.blogger_id);
     console.log(`[automation] Refreshed Blogger access token for blog ${account.blogger_id}; expires_in=${bloggerClient.auth.expiresIn}s; verified_blog=${bloggerClient.blog?.name || account.name}`);
-    const bloggerPost = await publishToBlogger(account.blogger_id, topic, seoInjected.html, bloggerClient.auth, { publishAt });
+    // Publish with hashtags as Blogger labels/tags (NOT in the body)
+    const bloggerPost = await publishToBlogger(account.blogger_id, topic, seoInjected.html, bloggerClient.auth, { publishAt, labels: hashtags });
 
     if (!publishAt) {
       const fetched = await fetchBloggerPost(account.blogger_id, bloggerPost.id, bloggerClient.auth);
