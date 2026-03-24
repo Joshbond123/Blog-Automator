@@ -20,11 +20,11 @@ async function startServer() {
   const PORT = Number(process.env.PORT || 3000);
 
   const SECRET_SETTING_FIELDS = ["blogger_client_id", "blogger_client_secret", "blogger_refresh_token"] as const;
-  const ARRAY_SETTING_FIELDS = new Set(["cloudflare_configs", "elevenlabs_keys", "lightning_keys"]);
+  const ARRAY_SETTING_FIELDS = new Set(["cloudflare_configs", "elevenlabs_keys", "cerebras_keys", "lightning_keys"]);
   const SETTINGS_FIELDS = new Set([
     "supabase_url", "supabase_service_role_key", "supabase_access_token", "github_pat",
     "cloudflare_configs", "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
-    "elevenlabs_keys", "lightning_keys", "catbox_hash", "ads_html", "ads_scripts", "ads_placement"
+    "elevenlabs_keys", "cerebras_keys", "catbox_hash", "ads_html", "ads_scripts", "ads_placement", "lightning_keys"
   ]);
 
   const ensureArray = (value: any) => {
@@ -44,7 +44,8 @@ async function startServer() {
     const normalized = { ...settings };
     normalized.cloudflare_configs = ensureArray(normalized.cloudflare_configs);
     normalized.elevenlabs_keys = ensureArray(normalized.elevenlabs_keys);
-    normalized.lightning_keys = ensureArray(normalized.lightning_keys);
+    normalized.cerebras_keys = ensureArray(normalized.cerebras_keys);
+    if (normalized.cerebras_keys.length === 0) normalized.cerebras_keys = ensureArray(normalized.lightning_keys);
     normalized.ads_placement = normalized.ads_placement || 'after';
 
     if (normalized.cloudflare_configs.length === 0 && normalized.cloudflare_api_keys && normalized.cloudflare_account_id) {
@@ -255,7 +256,7 @@ async function startServer() {
       res.json({
         cloudflare_configs: [],
         elevenlabs_keys: [],
-        lightning_keys: [],
+        cerebras_keys: [],
         supabase_url: cfg.url || "",
         supabase_service_role_key: "",
         supabase_access_token: cfg.anonKey || ""
@@ -293,7 +294,7 @@ async function startServer() {
       "supabase_url", "supabase_access_token", "supabase_service_role_key",
       "github_pat", "catbox_hash", "ads_html", "ads_scripts", "ads_placement",
       "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
-      "cloudflare_configs", "elevenlabs_keys", "lightning_keys"
+      "cloudflare_configs", "elevenlabs_keys", "cerebras_keys"
     ]);
     const field = req.params.field;
     if (!allowedFields.has(field)) return res.status(400).json({ error: "Field not allowed" });
@@ -338,13 +339,9 @@ async function startServer() {
 
     try {
       const response = await axios.post(
-        `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/@cf/meta/llama-3.3-70b-instruct-fp8-fast`,
+        `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/@cf/leonardo/phoenix-1.0`,
         {
-          messages: [
-            { role: 'system', content: 'Health check' },
-            { role: 'user', content: 'Respond with OK' }
-          ],
-          max_tokens: 8,
+          prompt: 'Cinematic mountain landscape at sunrise, no text, no logos, no watermark',
         },
         {
           timeout: 15000,

@@ -13,6 +13,8 @@ axios.defaults.proxy = false;
 const httpsProxyAgent = process.env.HTTPS_PROXY ? new HttpsProxyAgent(process.env.HTTPS_PROXY) : undefined;
 const execFileAsync = promisify(execFile);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const cloudflareRateLimitUntil = new Map<string, number>();
+const cerebrasRateLimitUntil = new Map<string, number>();
 
 function computeRetryDelayMs(error: any, attempt: number, baseMs = 2500, maxMs = 90000) {
   const retryAfterRaw = error?.response?.headers?.['retry-after'];
@@ -21,12 +23,21 @@ function computeRetryDelayMs(error: any, attempt: number, baseMs = 2500, maxMs =
   return Math.min(baseMs * Math.pow(2, Math.max(0, attempt - 1)), maxMs);
 }
 
+function isCloudflareDailyQuotaExhausted(error: any) {
+  const status = Number(error?.response?.status || 0);
+  const payload = error?.response?.data;
+  const code = Number(payload?.errors?.[0]?.code || 0);
+  const message = String(payload?.errors?.[0]?.message || '').toLowerCase();
+  return status === 429 && (code === 4006 || message.includes('daily free allocation'));
+}
+
 function outboundConfig(extra: Record<string, any> = {}) {
   return { proxy: false as const, httpsAgent: httpsProxyAgent, ...extra };
 }
 
-const DEFAULT_CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 const DEFAULT_CF_IMAGE_MODEL = '@cf/leonardo/phoenix-1.0';
+const LEGACY_IMAGE_MODELS = new Set(['@cf/black-forest-labs/flux-1-schnell']);
+const CEREBRAS_TEXT_MODEL = 'qwen-3-235b-a22b-instruct-2507';
 
 type KeyUsage = {
   key: string;
@@ -91,14 +102,14 @@ function extractCloudflareConfigsFromUnknownRow(rawValue: any): any[] {
   return [];
 }
 
-const ARRAY_SETTING_FIELDS = new Set(['cloudflare_configs', 'elevenlabs_keys', 'lightning_keys']);
+const ARRAY_SETTING_FIELDS = new Set(['cloudflare_configs', 'elevenlabs_keys', 'cerebras_keys', 'lightning_keys']);
 const KEY_VALUE_SETTING_FIELDS = new Set([
   'supabase_url', 'supabase_service_role_key', 'supabase_access_token', 'github_pat',
   'github_repo',
   'cloudflare_configs', 'blogger_client_id', 'blogger_client_secret', 'blogger_refresh_token',
-  'elevenlabs_keys', 'lightning_keys', 'catbox_hash', 'ads_html', 'ads_scripts', 'ads_placement',
-  'cloudflare_rotation_index', 'elevenlabs_rotation_index', 'lightning_rotation_index',
-  'cloudflare_text_model', 'cloudflare_image_model', 'global',
+  'elevenlabs_keys', 'cerebras_keys', 'catbox_hash', 'ads_html', 'ads_scripts', 'ads_placement',
+  'cloudflare_rotation_index', 'elevenlabs_rotation_index', 'cerebras_rotation_index', 'lightning_keys', 'lightning_rotation_index',
+  'cloudflare_image_model', 'global',
   'cloudflare_account_id', 'cloudflare_api_token', 'cloudflare_api_keys'
 ]);
 
@@ -178,20 +189,35 @@ async function getSettings() {
 
   if (!Array.isArray(settings.cloudflare_configs)) settings.cloudflare_configs = [];
   if (!Array.isArray(settings.elevenlabs_keys)) settings.elevenlabs_keys = [];
+  if (!Array.isArray(settings.cerebras_keys)) settings.cerebras_keys = [];
   if (!Array.isArray(settings.lightning_keys)) settings.lightning_keys = [];
 
   settings.cloudflare_rotation_index = Number(settings.cloudflare_rotation_index || 0);
   settings.elevenlabs_rotation_index = Number(settings.elevenlabs_rotation_index || 0);
+  settings.cerebras_rotation_index = Number(settings.cerebras_rotation_index || 0);
   settings.lightning_rotation_index = Number(settings.lightning_rotation_index || 0);
 
   settings.cloudflare_configs = settings.cloudflare_configs
     .map((c: any) => normalizeCloudflareConfig(c))
     .filter((c: any) => c.account_id && c.api_key);
   settings.elevenlabs_keys = settings.elevenlabs_keys.map((k: any) => normalizeUsageEntry(k));
-  settings.lightning_keys = settings.lightning_keys.map((k: any) => normalizeUsageEntry(k));
+  if (settings.cerebras_keys.length === 0 && settings.lightning_keys.length > 0) {
+    settings.cerebras_keys = settings.lightning_keys.map((k: any) => normalizeUsageEntry(k));
+    settings.cerebras_rotation_index = Number(settings.lightning_rotation_index || 0);
+    await saveSettingsPatch({
+      cerebras_keys: settings.cerebras_keys,
+      cerebras_rotation_index: settings.cerebras_rotation_index,
+    });
+  }
+  settings.cerebras_keys = settings.cerebras_keys.map((k: any) => normalizeUsageEntry(k));
 
-  settings.cloudflare_text_model = settings.cloudflare_text_model || DEFAULT_CF_TEXT_MODEL;
-  settings.cloudflare_image_model = settings.cloudflare_image_model || DEFAULT_CF_IMAGE_MODEL;
+  const configuredImageModel = String(settings.cloudflare_image_model || '').trim();
+  settings.cloudflare_image_model = configuredImageModel || DEFAULT_CF_IMAGE_MODEL;
+  if (LEGACY_IMAGE_MODELS.has(settings.cloudflare_image_model)) {
+    settings.cloudflare_image_model = DEFAULT_CF_IMAGE_MODEL;
+    await saveSettingsPatch({ cloudflare_image_model: DEFAULT_CF_IMAGE_MODEL });
+    console.log(`[automation] Migrated deprecated Cloudflare image model to ${DEFAULT_CF_IMAGE_MODEL}.`);
+  }
 
   return settings;
 }
@@ -224,9 +250,50 @@ function getEntryKey(entry: any) {
   return entry?.key || entry?.api_key || entry?.apiKey || entry?.apiToken || entry?.api_token || entry?.token;
 }
 
+function keyFingerprint(key: string) {
+  const k = String(key || '');
+  return k.length <= 8 ? k : `${k.slice(0, 4)}...${k.slice(-4)}`;
+}
+
+function markCloudflareRateLimited(key: string, retryMs: number) {
+  const now = Date.now();
+  const until = now + Math.max(5_000, retryMs);
+  cloudflareRateLimitUntil.set(key, until);
+  console.warn(`[automation] Cloudflare key ${keyFingerprint(key)} rate-limited; cooling down for ${Math.round((until - now) / 1000)}s`);
+}
+
+function markCerebrasRateLimited(key: string, retryMs: number) {
+  const now = Date.now();
+  const until = now + Math.max(5_000, retryMs);
+  cerebrasRateLimitUntil.set(key, until);
+  console.warn(`[automation] Cerebras key ${keyFingerprint(key)} rate-limited; cooling down for ${Math.round((until - now) / 1000)}s`);
+}
+
+async function waitForCerebrasKeyAvailability(keys: string[]) {
+  const now = Date.now();
+  const activeUntil = keys.map((key) => Number(cerebrasRateLimitUntil.get(key) || 0)).filter(Boolean);
+  if (!activeUntil.length) return;
+  const soonest = Math.min(...activeUntil);
+  if (soonest > now) {
+    const waitMs = Math.min(soonest - now, 90_000);
+    await sleep(waitMs);
+  }
+}
+
+async function waitForCloudflareKeyAvailability(keys: string[]) {
+  const now = Date.now();
+  const activeUntil = keys.map((key) => Number(cloudflareRateLimitUntil.get(key) || 0)).filter(Boolean);
+  if (!activeUntil.length) return;
+  const soonest = Math.min(...activeUntil);
+  if (soonest > now) {
+    const waitMs = Math.min(soonest - now, 90_000);
+    await sleep(waitMs);
+  }
+}
+
 async function pickRotatingKey(
-  listName: 'cloudflare_configs' | 'elevenlabs_keys' | 'lightning_keys',
-  indexName: 'cloudflare_rotation_index' | 'elevenlabs_rotation_index' | 'lightning_rotation_index',
+  listName: 'cloudflare_configs' | 'elevenlabs_keys' | 'cerebras_keys',
+  indexName: 'cloudflare_rotation_index' | 'elevenlabs_rotation_index' | 'cerebras_rotation_index',
 ) {
   const settings = await getSettings();
   const list = (settings[listName] || []).filter((item: any) => getEntryKey(item));
@@ -253,8 +320,8 @@ async function pickRotatingKey(
 }
 
 async function trackKeyUsage(
-  listName: 'cloudflare_configs' | 'elevenlabs_keys' | 'lightning_keys',
-  indexName: 'cloudflare_rotation_index' | 'elevenlabs_rotation_index' | 'lightning_rotation_index',
+  listName: 'cloudflare_configs' | 'elevenlabs_keys' | 'cerebras_keys',
+  indexName: 'cloudflare_rotation_index' | 'elevenlabs_rotation_index' | 'cerebras_rotation_index',
   usedKey: string,
   ok: boolean,
 ) {
@@ -292,41 +359,53 @@ async function uploadToCatbox(fileBuffer: Buffer, fileName: string) {
 }
 
 async function generateText(prompt: string, niche: string) {
-  const selected = await pickRotatingKey('cloudflare_configs', 'cloudflare_rotation_index');
-  const currentSettings = await getSettings();
-  const textModel = currentSettings.cloudflare_text_model || DEFAULT_CF_TEXT_MODEL;
+  const initialSettings = await getSettings();
+  const knownKeys = (initialSettings.cerebras_keys || []).map((entry: any) => getEntryKey(entry)).filter(Boolean);
+  if (!knownKeys.length) throw new Error('No Cerebras API keys configured for text generation.');
 
   let lastError: any = null;
-  for (let attempt = 1; attempt <= 8; attempt++) {
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    const selected = await pickRotatingKey('cerebras_keys', 'cerebras_rotation_index');
+    const cooldownUntil = Number(cerebrasRateLimitUntil.get(selected.key) || 0);
+    if (cooldownUntil > Date.now()) {
+      await waitForCerebrasKeyAvailability(knownKeys.length ? knownKeys : [selected.key]);
+    }
     try {
       const res = await axios.post(
-        `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/${textModel}`,
+        'https://api.cerebras.ai/v1/chat/completions',
         {
+          model: CEREBRAS_TEXT_MODEL,
+          temperature: 0.7,
+          max_completion_tokens: 2048,
           messages: [
             { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
             { role: 'user', content: prompt }
-          ],
-          max_tokens: 2048,
+          ]
         },
-        outboundConfig({ headers: { Authorization: `Bearer ${selected.key}` }, timeout: 120000 })
+        outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 120000 })
       );
 
-      await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, true);
-      return res.data.result.response;
+      await trackKeyUsage('cerebras_keys', 'cerebras_rotation_index', selected.key, true);
+      const content = String(res.data?.choices?.[0]?.message?.content || '').trim();
+      if (!content) throw new Error('Cerebras text response was empty.');
+      console.log(`[automation] Cerebras text key used: ${keyFingerprint(selected.key)} model=${CEREBRAS_TEXT_MODEL}`);
+      return content;
     } catch (err: any) {
       lastError = err;
+      await trackKeyUsage('cerebras_keys', 'cerebras_rotation_index', selected.key, false);
       const status = Number(err?.response?.status || 0);
-      const transient = !status || status >= 500 || status === 429;
-      if (attempt < 8 && transient) {
-        await sleep(computeRetryDelayMs(err, attempt));
+      if (status === 429 || status === 503) {
+        const retryMs = computeRetryDelayMs(err, attempt, 8_000, 180_000);
+        markCerebrasRateLimited(selected.key, retryMs);
+      }
+      const transient = !status || status >= 500 || status === 429 || status === 503;
+      if (attempt < 10 && transient) {
+        await sleep(computeRetryDelayMs(err, attempt, 4_000, 180_000));
         continue;
       }
-      await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, false);
       throw err;
     }
   }
-
-  await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, false);
   throw lastError || new Error('Text generation failed');
 }
 
@@ -654,31 +733,55 @@ function buildFallbackArticle(topic: string, _niche: string) {
 }
 
 async function generateImage(prompt: string) {
-  const selected = await pickRotatingKey('cloudflare_configs', 'cloudflare_rotation_index');
-  const currentSettings = await getSettings();
-  const imageModel = currentSettings.cloudflare_image_model || DEFAULT_CF_IMAGE_MODEL;
+  const initialSettings = await getSettings();
+  const imageModel = initialSettings.cloudflare_image_model || DEFAULT_CF_IMAGE_MODEL;
+  const knownKeys = (initialSettings.cloudflare_configs || []).map((entry: any) => getEntryKey(entry)).filter(Boolean);
+  let lastError: any = null;
 
-  try {
-    const res = await axios.post(
-      `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/${imageModel}`,
-      { prompt },
-      outboundConfig({ headers: { Authorization: `Bearer ${selected.key}` }, responseType: 'arraybuffer', timeout: 120000 })
-    );
-
-    await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, true);
-    const raw = Buffer.from(res.data);
-    const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
-    if (contentType.includes('application/json')) {
-      const payload = JSON.parse(raw.toString('utf8'));
-      const b64 = String(payload?.result?.image || payload?.image || '').trim();
-      if (!b64) throw new Error('Cloudflare image payload missing base64 image.');
-      return Buffer.from(b64, 'base64');
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    const selected = await pickRotatingKey('cloudflare_configs', 'cloudflare_rotation_index');
+    const cooldownUntil = Number(cloudflareRateLimitUntil.get(selected.key) || 0);
+    if (cooldownUntil > Date.now()) {
+      await waitForCloudflareKeyAvailability(knownKeys.length ? knownKeys : [selected.key]);
     }
-    return raw;
-  } catch (err) {
-    await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, false);
-    throw err;
+    try {
+      const res = await axios.post(
+        `https://api.cloudflare.com/client/v4/accounts/${selected.accountId}/ai/run/${imageModel}`,
+        { prompt },
+        outboundConfig({ headers: { Authorization: `Bearer ${selected.key}` }, responseType: 'arraybuffer', timeout: 120000 })
+      );
+
+      await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, true);
+      const raw = Buffer.from(res.data);
+      const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
+      if (contentType.includes('application/json')) {
+        const payload = JSON.parse(raw.toString('utf8'));
+        const b64 = String(payload?.result?.image || payload?.image || '').trim();
+        if (!b64) throw new Error('Cloudflare image payload missing base64 image.');
+        return Buffer.from(b64, 'base64');
+      }
+      return raw;
+    } catch (err: any) {
+      lastError = err;
+      await trackKeyUsage('cloudflare_configs', 'cloudflare_rotation_index', selected.key, false);
+      if (isCloudflareDailyQuotaExhausted(err)) {
+        throw new Error('Cloudflare Workers AI daily free allocation is exhausted for this account. Add a paid Workers AI account/key and retry.');
+      }
+      const status = Number(err?.response?.status || 0);
+      if (status === 429) {
+        const retryMs = computeRetryDelayMs(err, attempt, 8_000, 180_000);
+        markCloudflareRateLimited(selected.key, retryMs);
+      }
+      const transient = !status || status >= 500 || status === 429;
+      if (attempt < 10 && transient) {
+        await sleep(computeRetryDelayMs(err, attempt, 4_000, 180_000));
+        continue;
+      }
+      throw err;
+    }
   }
+
+  throw lastError || new Error('Image generation failed');
 }
 
 function detectImageMime(buffer: Buffer) {
@@ -979,19 +1082,46 @@ function buildTrendingQueriesForNiche(niche: string) {
 }
 
 async function fetchTrendingTopicsForNiche(niche: string) {
+  const extractTitles = (xml: string) => {
+    return [...String(xml || '').matchAll(/<title(?:\s[^>]*)?>\s*(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?\s*<\/title>/gi)]
+      .map((m) => String(m[1] || '').replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"').trim())
+      .filter(Boolean);
+  };
+  const fetchRssTitles = async (url: string) => {
+    const res = await axios.get(url, outboundConfig({
+      timeout: 12000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BlogAutomator/1.0; +https://github.com/Joshbond123/Blog-Automator)' },
+    }));
+    return extractTitles(String(res.data || ''));
+  };
+
   const queries = buildTrendingQueriesForNiche(niche);
   const collected: string[] = [];
+  const webFeeds = [
+    'https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en',
+    'https://rss.nytimes.com/services/xml/rss/nyt/Science.xml',
+    'https://www.sciencedaily.com/rss/top/science.xml',
+    'https://www.livescience.com/feeds/all',
+    'https://www.sciencealert.com/feed',
+  ];
 
   for (const query of queries) {
     try {
       const rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en-US&gl=US&ceid=US:en`;
-      const res = await axios.get(rssUrl, { timeout: 10000 });
-      const xml = String(res.data || '');
-      const matches = [...xml.matchAll(/<title>([^<]+)<\/title>/g)].map((m) => m[1].replace(/&amp;/g, '&').trim());
+      const matches = await fetchRssTitles(rssUrl);
       const topicTitles = matches.slice(1, 16);
       collected.push(...topicTitles);
     } catch {
       // continue with remaining feeds
+    }
+  }
+
+  for (const feedUrl of webFeeds) {
+    try {
+      const matches = await fetchRssTitles(feedUrl);
+      collected.push(...matches.slice(1, 30));
+    } catch {
+      // continue with other web feeds
     }
   }
 
@@ -1003,7 +1133,6 @@ async function fetchTrendingTopicsForNiche(niche: string) {
     deduped.push(topic);
     if (deduped.length >= 120) break;
   }
-
   return deduped.slice(0, 100);
 }
 
@@ -1072,6 +1201,7 @@ async function pickUniqueTrendingTopic(supabase: any, niche: string) {
 }
 
 async function rewriteToViralTitle(topic: string, niche: string) {
+  const bannedLeadPattern = /^(Breaking News|Breaking:|Alert:|Exclusive:|BREAKING|Revealed:|Discover:|Uncover:|Hidden Secrets:?|The Ultimate)/i;
   const raw = await generateText(
     `You are a headline editor at a major digital publication. Rewrite the topic below into ONE punchy, human-sounding blog headline.
 
@@ -1095,10 +1225,19 @@ Topic: ${topic}`,
     .replace(/^["']|["']$/g, '')
     .replace(/^(Breaking News[\s:]*|Alert[\s:]*|Exclusive[\s:]*|BREAKING[\s:]*)/i, '')
     .replace(/^(Shocking[\s:]*|Revealed[\s:]*|Uncover[\s:]*|Discover[\s:]*)/i, '')
+    .replace(/\s{2,}/g, ' ')
     .trim();
-  // If the result looks bad (too long, empty, or still has AI junk), fall back to the original topic
-  if (!title || title.split(/\s+/).length > 16 || /^(Breaking|Alert|Uncover|Secret|Ultimate|Shocking)/i.test(title)) {
-    title = topic;
+  // If the result looks bad (too long, empty, or still has AI junk), build a safer fallback from the raw topic.
+  if (!title || title.split(/\s+/).length > 16 || bannedLeadPattern.test(title)) {
+    title = String(topic)
+      .replace(bannedLeadPattern, '')
+      .replace(/\s*-\s*The Ultimate Source of Real-Time Information!?/gi, '')
+      .replace(/\s*[:\-–—]\s*(What You Need to Know|Here's Why)\s*$/i, '')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+  }
+  if (!title || title.split(/\s+/).length < 4 || title.split(/\s+/).length > 16 || bannedLeadPattern.test(title)) {
+    throw new Error(`Generated title failed humanization checks. topic="${topic}" generated="${raw}"`);
   }
   return title;
 }
@@ -1340,8 +1479,9 @@ function githubHeaders(token: string) {
 
 async function uploadBufferToGithub(repo: string, token: string, buffer: Buffer, path: string, message: string) {
   const { owner, name } = parseGithubRepo(repo);
+  const encodedPath = path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
   const res = await axios.put(
-    `https://api.github.com/repos/${owner}/${name}/contents/${encodeURIComponent(path)}`,
+    `https://api.github.com/repos/${owner}/${name}/contents/${encodedPath}`,
     { message, content: buffer.toString('base64') },
     outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
   );
@@ -1387,7 +1527,8 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
     const runs = Array.isArray(runsRes.data?.workflow_runs) ? runsRes.data.workflow_runs : [];
     const candidate = runs.find((run: any) => {
       const created = Date.parse(run?.created_at || '');
-      return run?.name === expectedRunName && created >= startedAt - 60_000;
+      const title = String(run?.display_title || run?.name || '').trim();
+      return title === expectedRunName && created >= startedAt - 60_000;
     });
     if (candidate) {
       runId = String(candidate.id);
@@ -1467,7 +1608,20 @@ export async function runBlogAutomation(scheduleId: string) {
   try {
     const forcedTopic = String((schedule?.metadata as any)?.forced_topic || '').trim() || process.env.FORCED_TOPIC || '';
     const discoveredTopic = forcedTopic || await pickUniqueTrendingTopic(supabase, niche);
-    const topic = forcedTopic || await rewriteToViralTitle(discoveredTopic, niche);
+    let topic = discoveredTopic;
+    if (!forcedTopic) {
+      try {
+        topic = await rewriteToViralTitle(discoveredTopic, niche);
+      } catch (titleError: any) {
+        const status = Number(titleError?.response?.status || 0);
+        if (status === 429) {
+          console.warn('[automation] Cloudflare text generation rate-limited during title rewrite; using discovered topic as title fallback.');
+          topic = discoveredTopic;
+        } else {
+          throw titleError;
+        }
+      }
+    }
     let content = '';
     try {
       content = await generateCleanCompleteArticle(topic, niche);
@@ -1493,14 +1647,27 @@ export async function runBlogAutomation(scheduleId: string) {
     if (/#[A-Za-z0-9]+/.test(articlePlain)) {
       throw new Error('Pre-publish validation failed: article body contains hashtags. Hashtags must only appear as Blogger labels.');
     }
-    if (/^(Breaking News|Breaking:|Alert:|Exclusive:|BREAKING)/i.test(topic.trim())) {
+    if (/^(Breaking News|Breaking:|Alert:|Exclusive:|BREAKING|Revealed:|Discover:|Uncover:|Hidden Secrets:?|The Ultimate)/i.test(topic.trim())) {
       throw new Error(`Pre-publish validation failed: title "${topic}" uses forbidden AI-generated prefix.`);
     }
     if (topic.split(/\s+/).length > 18) {
       throw new Error(`Pre-publish validation failed: title too long (${topic.split(/\s+/).length} words). Max 18.`);
     }
+    if (topic.split(/\s+/).length < 4) {
+      throw new Error(`Pre-publish validation failed: title "${topic}" is too short to be a natural headline.`);
+    }
+    if (/(?:hidden secrets|ultimate source|you won't believe|what you need to know|here'?s why)/i.test(topic)) {
+      throw new Error(`Pre-publish validation failed: title "${topic}" contains AI-style clickbait phrasing.`);
+    }
+    const repeatedPhraseMatch = articlePlain.match(/\b(\w+(?:\s+\w+){0,3})\b(?:[\s,.;:!?-]+\1\b){2,}/i);
+    if (repeatedPhraseMatch) {
+      throw new Error(`Pre-publish validation failed: AI-style repetition detected ("${repeatedPhraseMatch[1]}").`);
+    }
 
     const { sourceImageUrl, finalImageUrl } = await createFinalBlogImageOrThrow(topic, niche, settings);
+    if (!sourceImageUrl || !finalImageUrl) {
+      throw new Error('Pre-publish validation failed: image pipeline returned empty URL(s).');
+    }
     const imageAlt = `${topic} - cover image`;
     const imageBlock = `<img src="${finalImageUrl}" alt="${imageAlt.replace(/"/g, '&quot;')}" style="display:block;width:100%;max-width:1200px;height:auto;margin:12px auto;object-fit:cover;" /><br/>`;
 

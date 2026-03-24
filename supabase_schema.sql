@@ -13,7 +13,7 @@ create table if not exists settings (
   blogger_client_secret text,
   blogger_refresh_token text,
   elevenlabs_keys jsonb default '[]'::jsonb,
-  lightning_keys jsonb default '[]'::jsonb,
+  cerebras_keys jsonb default '[]'::jsonb,
   catbox_hash text,
   ads_html text,
   ads_scripts text,
@@ -85,7 +85,7 @@ create table if not exists video_jobs (
 alter table settings add column if not exists supabase_access_token text;
 alter table settings add column if not exists cloudflare_configs jsonb default '[]'::jsonb;
 alter table settings add column if not exists elevenlabs_keys jsonb default '[]'::jsonb;
-alter table settings add column if not exists lightning_keys jsonb default '[]'::jsonb;
+alter table settings add column if not exists cerebras_keys jsonb default '[]'::jsonb;
 alter table settings add column if not exists blogger_client_id text;
 alter table settings add column if not exists blogger_client_secret text;
 alter table settings add column if not exists blogger_refresh_token text;

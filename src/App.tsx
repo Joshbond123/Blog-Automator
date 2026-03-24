@@ -761,10 +761,9 @@ const Settings = () => {
   const [settings, setSettings] = useState<any>({
     cloudflare_configs: [],
     elevenlabs_keys: [],
-    lightning_keys: [],
+    cerebras_keys: [],
     ads_placement: 'after',
-    cloudflare_text_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-    cloudflare_image_model: '@cf/black-forest-labs/flux-2-dev'
+    cloudflare_image_model: '@cf/leonardo/phoenix-1.0'
   });
   const [fbPages, setFbPages] = useState<FacebookPage[]>([]);
   const [loading, setLoading] = useState(true);
@@ -807,7 +806,7 @@ const Settings = () => {
       ...raw,
       cloudflare_configs: safeArray(raw.cloudflare_configs),
       elevenlabs_keys: safeArray(raw.elevenlabs_keys),
-      lightning_keys: safeArray(raw.lightning_keys),
+      cerebras_keys: safeArray(raw.cerebras_keys).length ? safeArray(raw.cerebras_keys) : safeArray((raw as any).lightning_keys),
       ads_placement: raw.ads_placement || 'after'
     };
   };
@@ -939,8 +938,7 @@ const Settings = () => {
   const saveCloudflareConfigs = async (configs: any[]) => {
     await saveSection('cloudflare', {
       cloudflare_configs: configs,
-      cloudflare_text_model: '@cf/meta/llama-3.3-70b-instruct-fp8-fast',
-      cloudflare_image_model: '@cf/black-forest-labs/flux-2-dev'
+      cloudflare_image_model: '@cf/leonardo/phoenix-1.0'
     });
   };
 
@@ -1044,7 +1042,7 @@ const Settings = () => {
     { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
     { id: 'facebook', label: 'Facebook', icon: Facebook },
     { id: 'elevenlabs', label: 'ElevenLabs', icon: Mic },
-    { id: 'lightning', label: 'Lightning.ai', icon: Video },
+    { id: 'cerebras', label: 'Cerebras AI', icon: Video },
     { id: 'catbox', label: 'Catbox.moe', icon: ImageIcon },
     { id: 'ads', label: 'Ads Settings', icon: Layout },
   ];
@@ -1112,7 +1110,7 @@ const Settings = () => {
   supabase_access_token TEXT,
   cloudflare_configs JSONB DEFAULT '[]',
   elevenlabs_keys JSONB DEFAULT '[]',
-  lightning_keys JSONB DEFAULT '[]',
+  cerebras_keys JSONB DEFAULT '[]',
   github_pat TEXT,
   catbox_hash TEXT,
   ads_placement TEXT DEFAULT 'after',
@@ -1125,7 +1123,7 @@ INSERT INTO settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 -- Add missing columns if table exists
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS cloudflare_configs JSONB DEFAULT '[]';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS elevenlabs_keys JSONB DEFAULT '[]';
-ALTER TABLE settings ADD COLUMN IF NOT EXISTS lightning_keys JSONB DEFAULT '[]';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS cerebras_keys JSONB DEFAULT '[]';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_url TEXT;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_service_role_key TEXT;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_access_token TEXT;
@@ -1439,7 +1437,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     {validatingCloudflare || saving === 'cloudflare' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
                     Add Configuration
                   </button>
-                  <p className="text-xs text-zinc-500">Locked production models: <span className="text-zinc-300 font-mono">@cf/meta/llama-3.3-70b-instruct-fp8-fast</span> and <span className="text-zinc-300 font-mono">@cf/black-forest-labs/flux-2-dev</span>.</p>
+                  <p className="text-xs text-zinc-500">Workers AI is locked for image generation with <span className="text-zinc-300 font-mono">@cf/leonardo/phoenix-1.0</span>. Text generation is handled by Cerebras AI.</p>
 
                   <div className="space-y-4">
                     <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured Integrations</h4>
@@ -1695,11 +1693,11 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
               </div>
             )}
 
-            {activeSubTab === 'lightning' && (
+            {activeSubTab === 'cerebras' && (
               <div className="space-y-8">
                 <div>
-                  <h3 className="text-3xl font-bold text-white tracking-tight">Lightning.ai Video Generation</h3>
-                  <p className="text-zinc-400 mt-2 text-lg">Manage multiple API keys for high-performance video rendering.</p>
+                  <h3 className="text-3xl font-bold text-white tracking-tight">Cerebras AI Text Generation</h3>
+                  <p className="text-zinc-400 mt-2 text-lg">Manage rotating Cerebras API keys for blog text generation.</p>
                 </div>
 
                 <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
@@ -1708,17 +1706,17 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     <div className="flex flex-col sm:flex-row gap-4">
                       <input 
                         type="password" 
-                        id="li-api-key"
-                        placeholder="Enter Lightning.ai API Key..."
+                        id="cerebras-api-key"
+                        placeholder="Enter Cerebras AI API Key..."
                         className="flex-1 bg-zinc-950 border border-zinc-800 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-indigo-500 transition-all text-lg"
                       />
                       <button 
                         onClick={() => {
-                          const key = (document.getElementById('li-api-key') as HTMLInputElement).value;
+                          const key = (document.getElementById('cerebras-api-key') as HTMLInputElement).value;
                           if (key) {
-                            const newKeys = [...(settings.lightning_keys || []), { key, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
-                            saveSection('lightning', { lightning_keys: newKeys });
-                            (document.getElementById('li-api-key') as HTMLInputElement).value = '';
+                            const newKeys = [...(settings.cerebras_keys || []), { key, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
+                            saveSection('cerebras', { cerebras_keys: newKeys });
+                            (document.getElementById('cerebras-api-key') as HTMLInputElement).value = '';
                           }
                         }}
                         className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20 whitespace-nowrap"
@@ -1731,7 +1729,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <div className="space-y-4">
                     <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured API Keys</h4>
                     <div className="space-y-3">
-                      {settings.lightning_keys?.map((item: any, idx: number) => (
+                      {settings.cerebras_keys?.map((item: any, idx: number) => (
                         <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-zinc-700 transition-colors">
                           <div className="flex items-center gap-4">
                             <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
@@ -1750,9 +1748,9 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => {
-                                const key = prompt('Lightning.ai API Key', item.key || '') || item.key;
-                                const newKeys = settings.lightning_keys.map((k: any, i: number) => i === idx ? { ...k, key } : k);
-                                saveSection('lightning', { lightning_keys: newKeys });
+                                const key = prompt('Cerebras AI API Key', item.key || '') || item.key;
+                                const newKeys = settings.cerebras_keys.map((k: any, i: number) => i === idx ? { ...k, key } : k);
+                                saveSection('cerebras', { cerebras_keys: newKeys });
                               }}
                               className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
                             >
@@ -1760,8 +1758,8 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                             </button>
                             <button 
                               onClick={() => {
-                                const newKeys = settings.lightning_keys.filter((_: any, i: number) => i !== idx);
-                                saveSection('lightning', { lightning_keys: newKeys });
+                                const newKeys = settings.cerebras_keys.filter((_: any, i: number) => i !== idx);
+                                saveSection('cerebras', { cerebras_keys: newKeys });
                               }}
                               className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
                             >
@@ -1771,7 +1769,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                         </div>
                       ))}
                     </div>
-                    {(!settings.lightning_keys || settings.lightning_keys.length === 0) && (
+                    {(!settings.cerebras_keys || settings.cerebras_keys.length === 0) && (
                       <div className="p-12 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">
                         No API keys added yet.
                       </div>

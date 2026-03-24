@@ -36,6 +36,27 @@ print(f"{width}x{height} mean={mean:.2f} std={std:.2f}")
   if (out) console.log(`${label} validation: ${out}`);
 }
 
+async function assertNoDetectedText(path, label) {
+  const { stdout } = await execFileAsync('python3', ['-c', `
+import re
+import subprocess
+import sys
+
+path = sys.argv[1]
+try:
+    raw = subprocess.check_output(['tesseract', path, 'stdout', '--psm', '6'], stderr=subprocess.DEVNULL)
+except Exception as err:
+    raise SystemExit(f'OCR_ERROR:{err}')
+text = raw.decode('utf-8', errors='ignore')
+normalized = re.sub(r'[^A-Za-z0-9]+', '', text)
+print(normalized)
+`, path], { maxBuffer: 8 * 1024 * 1024 });
+  const normalized = String(stdout || '').trim();
+  if (normalized.length >= 6) {
+    throw new Error(`${label} contains detected text before overlay (ocr="${normalized.slice(0, 64)}")`);
+  }
+}
+
 async function renderOverlayWithPython(sourcePath, outputPath) {
   const python = `
 import os
@@ -43,7 +64,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 source_path = os.environ['SOURCE_PATH']
 output_path = os.environ['OUTPUT_PATH']
-title = (os.environ.get('TITLE_TEXT', '') or '').strip().upper()
+title = (os.environ.get('TITLE_TEXT', '') or '').strip()
 if not title:
     raise SystemExit('MISSING_TITLE')
 
@@ -127,16 +148,6 @@ box_w = min(max(widths) + text_pad_x * 2, int(w * 0.92))
 box_h = total_h + text_pad_y * 2
 box_x = (w - box_w) // 2
 box_y = max(start_y, h - box_h - max(int(h * 0.05), 24))
-box_r = max(int(min(box_w, box_h) * 0.08), 12)
-
-# Title card backdrop
-draw.rounded_rectangle(
-    [box_x, box_y, box_x + box_w, box_y + box_h],
-    radius=box_r,
-    fill=(0, 0, 0, 138),
-    outline=(255, 255, 255, 70),
-    width=2,
-)
 
 y = box_y + text_pad_y
 for idx, line in enumerate(lines):
@@ -147,9 +158,9 @@ for idx, line in enumerate(lines):
         (x, y),
         line,
         font=font,
-        fill=(255, 255, 255, 245),
-        stroke_width=2,
-        stroke_fill=(0, 0, 0, 215),
+        fill=(255, 255, 255, 250),
+        stroke_width=3,
+        stroke_fill=(0, 0, 0, 210),
     )
     y += th + line_gap
 
@@ -173,7 +184,7 @@ print(f'overlay_rendered {w}x{h}')
 async function main() {
   const sourceImageUrl = process.env.SOURCE_IMAGE_URL;
   const sourceImagePath = process.env.SOURCE_IMAGE_PATH;
-  const titleText = String(process.env.TITLE_TEXT || '').toUpperCase().trim();
+  const titleText = String(process.env.TITLE_TEXT || '').trim();
   const catboxHash = process.env.CATBOX_HASH;
   const correlationId = String(process.env.CORRELATION_ID || '').trim();
 
@@ -204,6 +215,7 @@ async function main() {
     await execFileAsync('curl', ['-fsSL', sourceImageUrl, '-o', sourcePath], { maxBuffer: 20 * 1024 * 1024 });
   }
   await validateImageFile(sourcePath, 'source');
+  await assertNoDetectedText(sourcePath, 'source');
 
   await renderOverlayWithPython(sourcePath, outputPath);
 

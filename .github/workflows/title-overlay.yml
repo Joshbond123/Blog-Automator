@@ -17,7 +17,7 @@ jobs:
       - name: Install ImageMagick
         run: |
           sudo apt-get update
-          sudo apt-get install -y imagemagick python3-pil fonts-dejavu-core
+          sudo apt-get install -y imagemagick python3-pil tesseract-ocr fonts-dejavu-core
           convert -version
 
       - name: Render title overlay and upload to Catbox
