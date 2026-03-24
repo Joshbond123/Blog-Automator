@@ -26,7 +26,7 @@ function outboundConfig(extra: Record<string, any> = {}) {
 }
 
 const DEFAULT_CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-const DEFAULT_CF_IMAGE_MODEL = '@cf/black-forest-labs/flux-2-dev';
+const DEFAULT_CF_IMAGE_MODEL = '@cf/leonardo/phoenix-1.0';
 
 type KeyUsage = {
   key: string;
