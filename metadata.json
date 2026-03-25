@@ -1,0 +1,9 @@
+{
+  "name": "AI Blog Automator",
+  "description": "Automated AI-powered blog and video generation platform with Blogger and Facebook integration.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}

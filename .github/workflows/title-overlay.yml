@@ -1,0 +1,41 @@
+name: Title Overlay Renderer
+run-name: Title Overlay Renderer - ${{ github.event.client_payload.correlationId }}
+
+on:
+  repository_dispatch:
+    types: [title_overlay]
+
+jobs:
+  overlay:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install ImageMagick
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick python3-pil tesseract-ocr fonts-dejavu-core
+          convert -version
+
+      - name: Render title overlay and upload to Catbox
+        env:
+          SOURCE_IMAGE_URL: ${{ github.event.client_payload.sourceImageUrl }}
+          SOURCE_IMAGE_PATH: ${{ github.event.client_payload.sourceImagePath }}
+          TITLE_TEXT: ${{ github.event.client_payload.title }}
+          CATBOX_HASH: ${{ github.event.client_payload.catboxHash }}
+          CORRELATION_ID: ${{ github.event.client_payload.correlationId }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/render-title-overlay.mjs
+
+      - name: Upload overlay result artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: title-overlay-result-${{ github.event.client_payload.correlationId }}
+          path: |
+            result.json
+            final-overlay.png
+          if-no-files-found: error
