@@ -901,14 +901,22 @@ async function createFinalBlogImageOrThrow(topic: string, niche: string, setting
 
   // ── 5. Download the overlay artifact ─────────────────────────────────────
   const overlayResult = await waitForOverlayArtifact(githubRepo, githubPat, correlationId);
-  assertRealGeneratedImage(overlayResult.overlayBuffer, 'Overlay output image');
+  if (overlayResult.overlayBuffer.length > 0) {
+    assertRealGeneratedImage(overlayResult.overlayBuffer, 'Overlay output image');
+  }
 
   // ── 6. Resolve finalImageUrl — prefer what the workflow returned (ImgBB),
   //       but fall back: try uploading from Replit to ImgBB, then GitHub. ────
   let finalImageUrl = overlayResult.finalImageUrl;
+  const overlayAvailable = overlayResult.overlayBuffer.length > 0;
   if (!/^https?:\/\/.+/i.test(finalImageUrl)) {
-    console.warn('[automation] finalImageUrl from overlay workflow is empty/invalid — uploading overlay from Replit.');
-    if (imgbbApiKey) {
+    if (overlayAvailable) {
+      console.warn('[automation] finalImageUrl from overlay workflow is empty/invalid — uploading overlay from Replit.');
+    } else {
+      console.warn('[automation] Overlay workflow produced no artifact — using source image as final image.');
+      finalImageUrl = sourceImageUrl;
+    }
+    if (overlayAvailable && imgbbApiKey) {
       try {
         finalImageUrl = await uploadToImgBB(overlayResult.overlayBuffer, `overlay-${correlationId}.png`);
         console.log(`[automation] Overlay uploaded to ImgBB from Replit: ${finalImageUrl}`);
@@ -916,7 +924,7 @@ async function createFinalBlogImageOrThrow(topic: string, niche: string, setting
         console.warn(`[automation] ImgBB overlay upload failed (${imgbbErr?.message}); falling back to GitHub.`);
       }
     }
-    if (!/^https?:\/\/.+/i.test(finalImageUrl)) {
+    if (overlayAvailable && !/^https?:\/\/.+/i.test(finalImageUrl)) {
       const overlayPath = `automation/results/overlay-${correlationId}.png`;
       const githubOverlayImage = await compressForGithub(overlayResult.overlayBuffer);
       finalImageUrl = await uploadBufferToGithub(githubRepo, githubPat, githubOverlayImage, overlayPath, `Upload overlay result: ${topic}`);
@@ -1609,7 +1617,8 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
       const status = String(candidate.status || '');
       const conclusion = String(candidate.conclusion || '');
       if (status === 'completed' && conclusion !== 'success') {
-        throw new Error(`Overlay workflow failed with conclusion=${conclusion}`);
+        console.warn(`[automation] Overlay workflow concluded=${conclusion}; falling back to Replit overlay upload.`);
+        return { overlayBuffer: Buffer.alloc(0), finalImageUrl: '' };
       }
       if (status === 'completed' && conclusion === 'success') break;
     }
@@ -1646,10 +1655,18 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
   return { overlayBuffer, finalImageUrl: String(resultPayload?.finalImageUrl || '').trim() };
 }
 
-async function publishToFacebook(pageId: string, accessToken: string, message: string, link?: string) {
+async function publishToFacebook(pageId: string, accessToken: string, message: string, imageUrl?: string) {
+  if (imageUrl && /^https?:\/\//i.test(imageUrl)) {
+    const res = await axios.post(
+      `https://graph.facebook.com/v19.0/${pageId}/photos`,
+      { caption: message, url: imageUrl, access_token: accessToken },
+      outboundConfig(),
+    );
+    return res.data;
+  }
   const res = await axios.post(
     `https://graph.facebook.com/v19.0/${pageId}/feed`,
-    { message, link, access_token: accessToken },
+    { message, access_token: accessToken },
     outboundConfig(),
   );
   return res.data;
@@ -1782,9 +1799,12 @@ export async function runBlogAutomation(scheduleId: string) {
         try {
           const teaserMessage = buildFacebookTeaser(content, topic, niche, hashtags, bloggerPost.url);
           const fbPost = await publishToFacebook(fbPage.page_id, fbPage.access_token, teaserMessage, finalImageUrl);
+          const fbPostId = fbPost.post_id || fbPost.id;
+
+          console.log(`✓ Facebook post published: https://www.facebook.com/${fbPage.page_id}/posts/${fbPostId}`);
 
           await axios.post(
-            `https://graph.facebook.com/v19.0/${fbPost.id}/comments`,
+            `https://graph.facebook.com/v19.0/${fbPostId}/comments`,
             {
               message: `Full article is live here: ${bloggerPost.url}
 
@@ -1792,13 +1812,15 @@ If this helped you, share your thoughts and read the full post now 🚀`,
               access_token: fbPage.access_token,
             },
           );
+          console.log(`✓ Facebook comment (article link) posted on ${fbPostId}`);
         } catch (fbError: any) {
-          console.warn('[automation] Facebook cross-post warning:', fbError?.message || fbError);
+          const errBody = fbError?.response?.data ? JSON.stringify(fbError.response.data) : '';
+          console.warn('[automation] Facebook cross-post warning:', fbError?.message || fbError, errBody);
         }
       }
     }
 
-    await supabase.from('posts').insert({
+    const { error: postInsertError } = await supabase.from('posts').insert({
       title: topic,
       blog_name: account.name,
       niche,
@@ -1806,16 +1828,8 @@ If this helped you, share your thoughts and read the full post now 🚀`,
       status: 'published',
       url: bloggerPost.url,
       published_at: new Date().toISOString(),
-      metadata: {
-        image_pipeline: {
-          source: 'cloudflare_workers_ai',
-          overlay: 'github_actions',
-          workers_image_url: sourceImageUrl,
-          final_image_url: finalImageUrl,
-        },
-        hashtags,
-      },
     });
+    if (postInsertError) console.warn('[automation] posts insert warning:', postInsertError.message);
 
     console.log('✓ Quality gate passed');
     for (const check of gate.checks) {
@@ -1827,6 +1841,7 @@ If this helped you, share your thoughts and read the full post now 🚀`,
     console.log('✓ Internal related-link injection: disabled for focused article quality');
     console.log(`✓ Scheduled publish time: ${publishAt || 'immediate'}`);
     console.log(`✓ Blogger post ID: ${bloggerPost.id}`);
+    console.log(`✓ Blogger post URL: ${bloggerPost.url}`);
 
     await supabase
       .from('schedules')
