@@ -212,7 +212,7 @@ async function main() {
   const sourceImageUrl = process.env.SOURCE_IMAGE_URL;
   const sourceImagePath = process.env.SOURCE_IMAGE_PATH;
   const titleText = String(process.env.TITLE_TEXT || '').trim();
-  const catboxHash = process.env.CATBOX_HASH;
+  const imgbbApiKey = process.env.IMGBB_API_KEY;
   const correlationId = String(process.env.CORRELATION_ID || '').trim();
 
   if ((!sourceImageUrl && !sourceImagePath) || !titleText) {
@@ -249,27 +249,31 @@ async function main() {
   await validateImageFile(outputPath, 'final');
 
   let finalImageUrl = '';
-  let catboxUploadError = '';
-  if (catboxHash) {
+  let imgbbUploadError = '';
+  if (imgbbApiKey) {
     try {
-      const { stdout } = await execFileAsync('curl', [
-        '-sS',
-        '-F', 'reqtype=fileupload',
-        '-F', `userhash=${catboxHash}`,
-        '-F', `fileToUpload=@${outputPath}`,
-        'https://catbox.moe/user/api.php',
-      ], { maxBuffer: 20 * 1024 * 1024 });
-      const candidate = String(stdout || '').trim();
+      const imageBuffer = await fs.readFile(outputPath);
+      const base64Image = imageBuffer.toString('base64');
+      const body = new URLSearchParams();
+      body.append('key', imgbbApiKey);
+      body.append('image', base64Image);
+      body.append('name', `overlay-${correlationId}`);
+      const uploadRes = await fetch('https://api.imgbb.com/1/upload', {
+        method: 'POST',
+        body: body,
+      });
+      const uploadData = await uploadRes.json();
+      const candidate = String(uploadData?.data?.url || '').trim();
       if (/^https?:\/\//.test(candidate)) finalImageUrl = candidate;
-      else catboxUploadError = candidate || 'empty response';
+      else imgbbUploadError = JSON.stringify(uploadData);
     } catch (err) {
-      catboxUploadError = String(err?.message || err);
+      imgbbUploadError = String(err?.message || err);
     }
   }
 
   await fs.writeFile(
     'result.json',
-    JSON.stringify({ correlationId, finalImageUrl, catboxUploadError, artifactImage: outputPath }, null, 2),
+    JSON.stringify({ correlationId, finalImageUrl, imgbbUploadError, artifactImage: outputPath }, null, 2),
     'utf8',
   );
 }

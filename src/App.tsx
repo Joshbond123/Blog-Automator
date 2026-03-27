@@ -1066,7 +1066,7 @@ const Settings = () => {
   const hasSupabaseSaved = Boolean(settings.supabase_url || settings.supabase_access_token || settings.supabase_service_role_key);
   const hasBloggerSaved = Boolean(settings.blogger_client_id || settings.blogger_client_secret || settings.blogger_refresh_token);
   const hasGitHubSaved = Boolean(settings.github_pat);
-  const hasCatboxSaved = Boolean(settings.catbox_hash);
+  const hasImgBBSaved = Boolean(settings.imgbb_api_key);
   const hasAdsSaved = Boolean(settings.ads_html || settings.ads_scripts || settings.ads_placement);
   const normalizeClientSettings = (raw: any = {}) => {
     const safeArray = (value: any) => {
@@ -1323,7 +1323,7 @@ const Settings = () => {
     { id: 'facebook', label: 'Facebook', icon: Facebook },
     { id: 'elevenlabs', label: 'ElevenLabs', icon: Mic },
     { id: 'cerebras', label: 'Cerebras AI', icon: Video },
-    { id: 'catbox', label: 'Catbox.moe', icon: ImageIcon },
+    { id: 'imgbb', label: 'ImgBB', icon: ImageIcon },
     { id: 'ads', label: 'Ads Settings', icon: Layout },
   ];
 
@@ -1462,7 +1462,7 @@ const Settings = () => {
   elevenlabs_keys JSONB DEFAULT '[]',
   cerebras_keys JSONB DEFAULT '[]',
   github_pat TEXT,
-  catbox_hash TEXT,
+  imgbb_api_key TEXT,
   ads_placement TEXT DEFAULT 'after',
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -2133,54 +2133,54 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
               </div>
             )}
 
-            {activeSubTab === 'catbox' && (
+            {activeSubTab === 'imgbb' && (
               <div className="space-y-8">
                 <div>
-                  <h3 className="text-3xl font-bold text-white tracking-tight">Catbox.moe Configuration</h3>
-                  <p className="text-zinc-400 mt-2 text-lg">Configure your Catbox user hash for hosting blog images and videos.</p>
+                  <h3 className="text-3xl font-bold text-white tracking-tight">ImgBB Configuration</h3>
+                  <p className="text-zinc-400 mt-2 text-lg">Free image hosting for blog post images. Get your free API key at <span className="text-indigo-400 font-mono">api.imgbb.com</span>.</p>
                 </div>
 
                 <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-3">
-                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">User Hash</label>
+                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">API Key</label>
                     <div className="relative group">
                       <ImageIcon className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
-                      <input 
-                        type="password" 
-                        value={settings.catbox_hash || ''}
-                        onChange={(e) => setSettings({ ...settings, catbox_hash: e.target.value })}
+                      <input
+                        type="password"
+                        value={settings.imgbb_api_key || ''}
+                        onChange={(e) => setSettings({ ...settings, imgbb_api_key: e.target.value })}
                         className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg"
-                        placeholder="Enter your Catbox user hash..."
+                        placeholder="Enter your ImgBB API key..."
                       />
                     </div>
-                    <p className="text-xs text-zinc-500 ml-1">Used for permanent hosting of generated assets.</p>
+                    <p className="text-xs text-zinc-500 ml-1">Free permanent image hosting. Sign up free at api.imgbb.com to get your key.</p>
                   </div>
 
-                  <button 
-                    onClick={() => saveSection('catbox', { catbox_hash: settings.catbox_hash })}
-                    disabled={saving === 'catbox'}
+                  <button
+                    onClick={() => saveSection('imgbb', { imgbb_api_key: settings.imgbb_api_key })}
+                    disabled={saving === 'imgbb'}
                     className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
                   >
-                    {saving === 'catbox' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+                    {saving === 'imgbb' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
                     Save Settings
                   </button>
 
                   <div className="space-y-4">
-                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
-                    {hasCatboxSaved ? (
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configuration</h4>
+                    {hasImgBBSaved ? (
                       <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20">
                         <div>
-                          <p className="text-zinc-400 text-sm">Saved Catbox.moe</p>
-                          <p className="text-white font-mono text-xs">{maskValue(settings.catbox_hash)}</p>
+                          <p className="text-zinc-400 text-sm">Saved ImgBB API Key</p>
+                          <p className="text-white font-mono text-xs">{maskValue(settings.imgbb_api_key)}</p>
                           <p className="text-[10px] text-emerald-500 uppercase tracking-widest font-bold mt-1">Configured</p>
                         </div>
                         <div className="flex gap-2">
-                          <button onClick={() => saveSection('catbox', { catbox_hash: settings.catbox_hash })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
-                          <button onClick={() => deleteSettingField('catbox_hash')} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
+                          <button onClick={() => saveSection('imgbb', { imgbb_api_key: settings.imgbb_api_key })} className="px-3 py-1 rounded-lg bg-indigo-600 text-white text-xs font-bold">Edit</button>
+                          <button onClick={() => deleteSettingField('imgbb_api_key')} className="px-3 py-1 rounded-lg bg-rose-500/10 text-rose-400 text-xs font-bold">Delete</button>
                         </div>
                       </div>
                     ) : (
-                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No Catbox configuration saved yet.</div>
+                      <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No ImgBB API key saved yet.</div>
                     )}
                   </div>
                 </div>

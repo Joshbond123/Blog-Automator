@@ -5,13 +5,12 @@ import dotenv from 'dotenv';
 import { decryptSecret } from './secrets';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import fs from 'node:fs/promises';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import sharp from 'sharp';
+import AdmZip from 'adm-zip';
 
 dotenv.config();
 axios.defaults.proxy = false;
 const httpsProxyAgent = process.env.HTTPS_PROXY ? new HttpsProxyAgent(process.env.HTTPS_PROXY) : undefined;
-const execFileAsync = promisify(execFile);
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const cloudflareRateLimitUntil = new Map<string, number>();
 const cerebrasRateLimitUntil = new Map<string, number>();
@@ -35,8 +34,12 @@ function outboundConfig(extra: Record<string, any> = {}) {
   return { proxy: false as const, httpsAgent: httpsProxyAgent, ...extra };
 }
 
-const DEFAULT_CF_IMAGE_MODEL = '@cf/leonardo/phoenix-1.0';
-const LEGACY_IMAGE_MODELS = new Set(['@cf/black-forest-labs/flux-1-schnell']);
+const DEFAULT_CF_IMAGE_MODEL = '@cf/stabilityai/stable-diffusion-xl-base-1.0';
+const LEGACY_IMAGE_MODELS = new Set([
+  '@cf/black-forest-labs/flux-1-schnell',
+  '@cf/black-forest-labs/flux-2-dev',
+  '@cf/leonardo/phoenix-1.0',
+]);
 const CEREBRAS_TEXT_MODEL = 'qwen-3-235b-a22b-instruct-2507';
 
 type KeyUsage = {
@@ -107,7 +110,7 @@ const KEY_VALUE_SETTING_FIELDS = new Set([
   'supabase_url', 'supabase_service_role_key', 'supabase_access_token', 'github_pat',
   'github_repo',
   'cloudflare_configs', 'blogger_client_id', 'blogger_client_secret', 'blogger_refresh_token',
-  'elevenlabs_keys', 'cerebras_keys', 'catbox_hash', 'ads_html', 'ads_scripts', 'ads_placement',
+  'elevenlabs_keys', 'cerebras_keys', 'imgbb_api_key', 'ads_html', 'ads_scripts', 'ads_placement',
   'cloudflare_rotation_index', 'elevenlabs_rotation_index', 'cerebras_rotation_index', 'lightning_keys', 'lightning_rotation_index',
   'cloudflare_image_model', 'global',
   'cloudflare_account_id', 'cloudflare_api_token', 'cloudflare_api_keys'
@@ -343,19 +346,23 @@ async function trackKeyUsage(
   await saveSettingsPatch({ [listName]: list, [indexName]: Number(settings[indexName] || 0) });
 }
 
-async function uploadToCatbox(fileBuffer: Buffer, fileName: string) {
+async function uploadToImgBB(fileBuffer: Buffer, fileName: string): Promise<string> {
   const settings = await getSettings();
+  const apiKey = decryptSecret(settings.imgbb_api_key || '');
+  if (!apiKey) throw new Error('No ImgBB API key configured. Add one at Settings → ImgBB.');
+  const base64Image = fileBuffer.toString('base64');
   const form = new FormData();
-  form.append('reqtype', 'fileupload');
-  form.append('userhash', settings.catbox_hash || '');
-  form.append('fileToUpload', fileBuffer, fileName);
-
-  const res = await axios.post('https://catbox.moe/user/api.php', form, {
+  form.append('key', apiKey);
+  form.append('image', base64Image);
+  form.append('name', fileName.replace(/\.[^.]+$/, ''));
+  const res = await axios.post('https://api.imgbb.com/1/upload', form, {
     headers: form.getHeaders(),
-    maxRedirects: 5,
+    timeout: 60000,
     ...outboundConfig(),
   });
-  return res.data;
+  const url = String(res.data?.data?.url || '').trim();
+  if (!/^https?:\/\//.test(url)) throw new Error(`ImgBB upload failed: ${JSON.stringify(res.data)}`);
+  return url;
 }
 
 async function generateText(prompt: string, niche: string) {
@@ -830,28 +837,95 @@ async function generateWorkersAiImageWithRetry(topic: string, niche: string, max
   throw new Error(`Workers AI image generation failed after ${maxAttempts} attempts: ${String(lastError?.message || lastError)}`);
 }
 
+/**
+ * Compresses a buffer so it is under GITHUB_MAX_BYTES (900 KB) for the GitHub Contents API.
+ * Returns the original buffer if it is already small enough.
+ */
+async function compressForGithub(buf: Buffer): Promise<Buffer> {
+  const GITHUB_MAX_BYTES = 900 * 1024;
+  if (buf.length <= GITHUB_MAX_BYTES) return buf;
+  let compressed = await sharp(buf)
+    .resize({ width: 1280, height: 720, fit: 'inside', withoutEnlargement: true })
+    .png({ compressionLevel: 9, quality: 80 })
+    .toBuffer();
+  if (compressed.length <= GITHUB_MAX_BYTES) {
+    console.log(`[automation] Compressed for GitHub: ${buf.length} → ${compressed.length} bytes`);
+    return compressed;
+  }
+  compressed = await sharp(buf)
+    .resize({ width: 1024, height: 576, fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 85 })
+    .toBuffer();
+  console.log(`[automation] Compressed (JPEG fallback) for GitHub: ${buf.length} → ${compressed.length} bytes`);
+  return compressed;
+}
+
 async function createFinalBlogImageOrThrow(topic: string, niche: string, settings: any) {
   const githubPat = decryptSecret(settings.github_pat || '');
   const githubRepo = String(settings.github_repo || '').trim();
-  const catboxHash = decryptSecret(settings.catbox_hash || '');
+  const imgbbApiKey = decryptSecret(settings.imgbb_api_key || '');
   if (!githubPat) throw new Error('Missing github_pat setting for title overlay workflow.');
   if (!githubRepo) throw new Error('Missing github_repo setting for title overlay workflow.');
-  if (!catboxHash) throw new Error('Missing catbox_hash setting for image handoff workflow.');
+  if (!imgbbApiKey) console.warn('[automation] imgbb_api_key is not set — image will be uploaded to GitHub as fallback.');
 
+  // ── 1. Generate image ──────────────────────────────────────────────────────
   const workersImage = await generateWorkersAiImageWithRetry(topic, niche, 6);
   assertRealGeneratedImage(workersImage, 'Workers AI image');
-  const workersFilename = `workers-ai-${Date.now()}.png`;
-  const sourceImageUrl = await uploadToCatbox(workersImage, workersFilename);
-  if (!/^https?:\/\/.+/i.test(sourceImageUrl)) throw new Error('Workers AI image upload URL is invalid.');
 
-  const sourceImagePath = `automation/incoming/workers-ai-${Date.now()}.png`;
-  await uploadBufferToGithub(githubRepo, githubPat, workersImage, sourceImagePath, `Upload Workers AI source image: ${topic}`);
+  // ── 2. Upload compressed source to GitHub (Contents API limit: ~1 MB) ──────
+  const ts = Date.now();
+  const sourceImagePath = `automation/incoming/workers-ai-${ts}.png`;
+  const githubSourceImage = await compressForGithub(workersImage);
+  const githubDownloadUrl = await uploadBufferToGithub(githubRepo, githubPat, githubSourceImage, sourceImagePath, `Upload Workers AI source image: ${topic}`);
 
-  const correlationId = await dispatchTitleOverlayWorkflow(githubRepo, githubPat, sourceImageUrl, sourceImagePath, topic, catboxHash);
+  // ── 3. Build sourceImageUrl — try ImgBB first, fall back to GitHub URL ────
+  const { owner: ghOwner, name: ghName } = parseGithubRepo(githubRepo);
+  const githubRawFallback = `https://raw.githubusercontent.com/${ghOwner}/${ghName}/main/${sourceImagePath}`;
+  let sourceImageUrl = '';
+  if (imgbbApiKey) {
+    try {
+      sourceImageUrl = await uploadToImgBB(workersImage, `workers-ai-${ts}.png`);
+      console.log(`[automation] Source image uploaded to ImgBB: ${sourceImageUrl}`);
+    } catch (imgbbErr: any) {
+      console.warn(`[automation] ImgBB source upload failed (${imgbbErr?.message}); using GitHub URL as fallback.`);
+      sourceImageUrl = githubDownloadUrl || githubRawFallback;
+    }
+  } else {
+    console.warn('[automation] No ImgBB API key — using GitHub URL for source image.');
+    sourceImageUrl = githubDownloadUrl || githubRawFallback;
+  }
+  if (!/^https?:\/\/.+/i.test(sourceImageUrl)) throw new Error('Could not obtain a valid source image URL (ImgBB and GitHub both failed).');
+
+  // ── 4. Dispatch GitHub Actions overlay workflow ───────────────────────────
+  const correlationId = await dispatchTitleOverlayWorkflow(githubRepo, githubPat, sourceImageUrl, sourceImagePath, topic, imgbbApiKey);
+
+  // ── 5. Download the overlay artifact ─────────────────────────────────────
   const overlayResult = await waitForOverlayArtifact(githubRepo, githubPat, correlationId);
   assertRealGeneratedImage(overlayResult.overlayBuffer, 'Overlay output image');
-  if (!/^https?:\/\/.+/i.test(overlayResult.finalImageUrl)) throw new Error('Final overlaid image URL is invalid.');
-  return { sourceImageUrl, finalImageUrl: overlayResult.finalImageUrl };
+
+  // ── 6. Resolve finalImageUrl — prefer what the workflow returned (ImgBB),
+  //       but fall back: try uploading from Replit to ImgBB, then GitHub. ────
+  let finalImageUrl = overlayResult.finalImageUrl;
+  if (!/^https?:\/\/.+/i.test(finalImageUrl)) {
+    console.warn('[automation] finalImageUrl from overlay workflow is empty/invalid — uploading overlay from Replit.');
+    if (imgbbApiKey) {
+      try {
+        finalImageUrl = await uploadToImgBB(overlayResult.overlayBuffer, `overlay-${correlationId}.png`);
+        console.log(`[automation] Overlay uploaded to ImgBB from Replit: ${finalImageUrl}`);
+      } catch (imgbbErr: any) {
+        console.warn(`[automation] ImgBB overlay upload failed (${imgbbErr?.message}); falling back to GitHub.`);
+      }
+    }
+    if (!/^https?:\/\/.+/i.test(finalImageUrl)) {
+      const overlayPath = `automation/results/overlay-${correlationId}.png`;
+      const githubOverlayImage = await compressForGithub(overlayResult.overlayBuffer);
+      finalImageUrl = await uploadBufferToGithub(githubRepo, githubPat, githubOverlayImage, overlayPath, `Upload overlay result: ${topic}`);
+      console.log(`[automation] Overlay uploaded to GitHub: ${finalImageUrl}`);
+    }
+  }
+  if (!/^https?:\/\/.+/i.test(finalImageUrl)) throw new Error('Could not obtain a valid final image URL (ImgBB and GitHub both failed).');
+
+  return { sourceImageUrl, finalImageUrl };
 }
 
 async function generateVoiceover(text: string) {
@@ -1490,7 +1564,7 @@ async function uploadBufferToGithub(repo: string, token: string, buffer: Buffer,
   return url;
 }
 
-async function dispatchTitleOverlayWorkflow(repo: string, token: string, sourceImageUrl: string, sourceImagePath: string, title: string, catboxHash: string) {
+async function dispatchTitleOverlayWorkflow(repo: string, token: string, sourceImageUrl: string, sourceImagePath: string, title: string, imgbbApiKey: string) {
   const { owner, name } = parseGithubRepo(repo);
   const correlationId = `overlay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -1502,7 +1576,7 @@ async function dispatchTitleOverlayWorkflow(repo: string, token: string, sourceI
         sourceImageUrl,
         sourceImagePath,
         title,
-        catboxHash,
+        imgbbApiKey,
         correlationId,
       },
     },
@@ -1557,24 +1631,17 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
     responseType: 'arraybuffer',
     timeout: 60000,
   }));
-  const zipPath = `/tmp/overlay-${correlationId}.zip`;
-  const imagePath = `/tmp/overlay-${correlationId}.png`;
-  const resultPath = `/tmp/overlay-${correlationId}.json`;
-  await fs.writeFile(zipPath, Buffer.from(zipRes.data));
-  await execFileAsync('unzip', ['-p', zipPath, 'result.json'], { maxBuffer: 40 * 1024 * 1024, encoding: 'utf8' as any })
-    .then(async ({ stdout }) => {
-      await fs.writeFile(resultPath, String(stdout || ''));
-    });
-  await execFileAsync('unzip', ['-p', zipPath, 'final-overlay.png'], { maxBuffer: 40 * 1024 * 1024, encoding: 'buffer' as any })
-    .then(async ({ stdout }) => {
-      const out = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout as any);
-      await fs.writeFile(imagePath, out);
-    });
-  const resultPayload = JSON.parse(await fs.readFile(resultPath, 'utf8'));
+  const zipBuf = Buffer.from(zipRes.data);
+  const zip = new AdmZip(zipBuf);
+  const resultEntry = zip.getEntry('result.json');
+  if (!resultEntry) throw new Error('result.json not found in overlay artifact zip.');
+  const pngEntry = zip.getEntry('final-overlay.png');
+  if (!pngEntry) throw new Error('final-overlay.png not found in overlay artifact zip.');
+  const resultPayload = JSON.parse(resultEntry.getData().toString('utf8'));
   if (String(resultPayload?.correlationId || '') !== correlationId) {
     throw new Error('Overlay artifact correlation mismatch.');
   }
-  const overlayBuffer = await fs.readFile(imagePath);
+  const overlayBuffer = pngEntry.getData();
   if (overlayBuffer.length < 15 * 1024) throw new Error('Overlay image artifact is too small.');
   return { overlayBuffer, finalImageUrl: String(resultPayload?.finalImageUrl || '').trim() };
 }
@@ -1794,7 +1861,12 @@ export async function runVideoAutomation(scheduleId: string) {
   const topic = await generateText(`Generate a viral video topic for the ${niche} niche.`, niche);
   const script = await generateText(`Write a 30-second video script for the topic: "${topic}".`, niche);
   const voiceBuffer = await generateVoiceover(script);
-  const voiceUrl = await uploadToCatbox(voiceBuffer, 'voiceover.mp3');
+  const githubRepo = String(settings.github_repo || '').trim();
+  const githubPat = decryptSecret(settings.github_pat || '');
+  const voicePath = `automation/voiceovers/voice-${Date.now()}.mp3`;
+  const voiceUrl = (githubRepo && githubPat)
+    ? await uploadBufferToGithub(githubRepo, githubPat, voiceBuffer, voicePath, `Upload voiceover: ${topic}`)
+    : '';
 
   if (settings.github_pat) {
     await axios.post(
@@ -1805,7 +1877,7 @@ export async function runVideoAutomation(scheduleId: string) {
           topic,
           script,
           voiceUrl,
-          catboxHash: settings.catbox_hash,
+          imgbbApiKey: decryptSecret(settings.imgbb_api_key || ''),
           fbPageId: fbPage.page_id,
           fbAccessToken: fbPage.access_token
         }

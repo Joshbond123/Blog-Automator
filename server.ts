@@ -23,8 +23,8 @@ async function startServer() {
   const ARRAY_SETTING_FIELDS = new Set(["cloudflare_configs", "elevenlabs_keys", "cerebras_keys", "lightning_keys"]);
   const SETTINGS_FIELDS = new Set([
     "supabase_url", "supabase_service_role_key", "supabase_access_token", "github_pat",
-    "cloudflare_configs", "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
-    "elevenlabs_keys", "cerebras_keys", "catbox_hash", "ads_html", "ads_scripts", "ads_placement", "lightning_keys"
+    "cloudflare_configs", "cloudflare_image_model", "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
+    "elevenlabs_keys", "cerebras_keys", "imgbb_api_key", "ads_html", "ads_scripts", "ads_placement", "lightning_keys"
   ]);
 
   const ensureArray = (value: any) => {
@@ -598,6 +598,128 @@ async function startServer() {
       res.sendStatus(204);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Temporary GitHub workflow debug endpoint
+  app.get("/api/debug/gh-test", async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      // Try both schema formats
+      const kvResult = await supabase.from('settings').select('setting_key, setting_value');
+      const srResult = await supabase.from('settings').select('*').limit(1);
+      
+      let ghPat = '', ghRepo = '';
+      
+      // Key-value format
+      if (!kvResult.error && kvResult.data?.length) {
+        const rows = kvResult.data;
+        const ghPatRow = rows.find((r: any) => r.setting_key === 'github_pat');
+        const ghRepoRow = rows.find((r: any) => r.setting_key === 'github_repo');
+        if (ghPatRow) ghPat = decryptSecret(String(ghPatRow.setting_value || ''));
+        if (ghRepoRow) ghRepo = String(ghRepoRow.setting_value || '');
+      }
+      
+      // Single-row format fallback
+      if (!ghPat && !srResult.error && srResult.data?.length) {
+        const row = srResult.data[0];
+        ghPat = decryptSecret(String(row.github_pat || ''));
+        ghRepo = String(row.github_repo || '');
+      }
+      
+      const info: any = { 
+        kvRows: kvResult.data?.length || 0, srRows: srResult.data?.length || 0,
+        kvError: kvResult.error?.message, srError: srResult.error?.message,
+        repo: ghRepo || 'EMPTY', patSet: !!ghPat, patLen: ghPat?.length
+      };
+      
+      if (!ghPat || !ghRepo) return res.json({ error: 'Missing github_pat or github_repo', ...info });
+      
+      const [owner, repoName] = ghRepo.split('/');
+      const runsRes = await axios.get(
+        `https://api.github.com/repos/${owner}/${repoName}/actions/runs?event=repository_dispatch&per_page=5`,
+        { headers: { Authorization: `Bearer ${ghPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }
+      );
+      const runs = (runsRes.data?.workflow_runs || []).slice(0, 3).map((r: any) => ({
+        id: r.id, name: r.name, display_title: r.display_title, status: r.status, conclusion: r.conclusion, created_at: r.created_at
+      }));
+      // Also get jobs for the first (most recent) run
+      if (runs.length > 0) {
+        const jobsRes = await axios.get(
+          `https://api.github.com/repos/${owner}/${repoName}/actions/runs/${runs[0].id}/jobs`,
+          { headers: { Authorization: `Bearer ${ghPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }
+        );
+        const jobs = (jobsRes.data?.jobs || []).map((j: any) => ({
+          name: j.name, status: j.status, conclusion: j.conclusion,
+          steps: (j.steps||[]).filter((s: any) => s.conclusion === 'failure').map((s: any) => ({ name: s.name, conclusion: s.conclusion }))
+        }));
+        // Get logs for the first job
+        const firstJob = jobsRes.data?.jobs?.[0];
+        let logSnippet = '';
+        if (firstJob?.id) {
+          try {
+            const logRes = await axios.get(
+              `https://api.github.com/repos/${owner}/${repoName}/actions/jobs/${firstJob.id}/logs`,
+              { headers: { Authorization: `Bearer ${ghPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, maxRedirects: 5 }
+            );
+            const logText = typeof logRes.data === 'string' ? logRes.data : JSON.stringify(logRes.data);
+            // Get last 3000 chars of logs (where errors usually are)
+            logSnippet = logText.slice(-3000);
+          } catch (logErr: any) { logSnippet = `Could not fetch logs: ${logErr.message}`; }
+        }
+        // Fetch the overlay script to understand what it expects
+        let overlayScript = '';
+        try {
+          const scriptRes = await axios.get(
+            `https://api.github.com/repos/${owner}/${repoName}/contents/scripts/render-title-overlay.mjs`,
+            { headers: { Authorization: `Bearer ${ghPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }
+          );
+          if (scriptRes.data?.content) {
+            overlayScript = Buffer.from(scriptRes.data.content, 'base64').toString('utf8').slice(0, 4000);
+          }
+        } catch (e: any) { overlayScript = `Could not fetch script: ${e.message}`; }
+        
+        // List recent files in automation/incoming folder
+        let incomingFiles = '';
+        try {
+          const filesRes = await axios.get(
+            `https://api.github.com/repos/${owner}/${repoName}/contents/automation/incoming`,
+            { headers: { Authorization: `Bearer ${ghPat}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } }
+          );
+          incomingFiles = JSON.stringify((filesRes.data||[]).slice(-5).map((f:any) => ({name: f.name, size: f.size})));
+        } catch (e: any) { incomingFiles = `Error: ${e.message}`; }
+        
+        return res.json({ ...info, runs, jobs, logSnippet, overlayScript, incomingFiles });
+      }
+      res.json({ ...info, runs });
+    } catch (err: any) {
+      res.json({ error: err?.response?.data || err.message });
+    }
+  });
+
+  // Temporary Cloudflare debug endpoint
+  app.get("/api/debug/cf-test", async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const { data } = await supabase.from('settings').select('setting_key, setting_value');
+      const cfRow = (data||[]).find((r: any) => r.setting_key === 'cloudflare_configs');
+      const modelRow = (data||[]).find((r: any) => r.setting_key === 'cloudflare_image_model');
+      if (!cfRow) return res.json({ error: "No cloudflare_configs row", allKeys: (data||[]).map((r:any)=>r.setting_key) });
+      const cfgs = JSON.parse(cfRow.setting_value || '[]');
+      const first = cfgs[0];
+      if (!first) return res.json({ error: "No config entries in cloudflare_configs" });
+      const accountId = decryptSecret(String(first.account_id || ''));
+      const apiKey = decryptSecret(String(first.api_key || ''));
+      const model = (modelRow?.setting_value || '@cf/stabilityai/stable-diffusion-xl-base-1.0').replace(/^"|"$/g,'');
+      const cfRes = await axios.post(
+        `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`,
+        { prompt: 'red apple on white background' },
+        { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 30000, responseType: 'arraybuffer', validateStatus: () => true }
+      );
+      const body = (cfRes.data as Buffer).toString('utf8');
+      res.json({ status: cfRes.status, model, accountIdPrefix: accountId?.substring(0,8), apiKeyLen: apiKey?.length, body: body.substring(0,600) });
+    } catch (err: any) {
+      res.json({ error: err.message });
     }
   });
 

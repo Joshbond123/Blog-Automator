@@ -20,12 +20,12 @@ jobs:
           sudo apt-get install -y imagemagick python3-pil tesseract-ocr fonts-dejavu-core
           convert -version
 
-      - name: Render title overlay and upload to Catbox
+      - name: Render title overlay and upload to ImgBB
         env:
           SOURCE_IMAGE_URL: ${{ github.event.client_payload.sourceImageUrl }}
           SOURCE_IMAGE_PATH: ${{ github.event.client_payload.sourceImagePath }}
           TITLE_TEXT: ${{ github.event.client_payload.title }}
-          CATBOX_HASH: ${{ github.event.client_payload.catboxHash }}
+          IMGBB_API_KEY: ${{ github.event.client_payload.imgbbApiKey }}
           CORRELATION_ID: ${{ github.event.client_payload.correlationId }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
