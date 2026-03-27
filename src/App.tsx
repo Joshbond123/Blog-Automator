@@ -294,26 +294,47 @@ const BloggerAccounts = () => {
   const [loading, setLoading] = useState(true);
   const [connectTarget, setConnectTarget] = useState<{ blogger_id: string; name: string; url: string } | null>(null);
   const [selectedNiche, setSelectedNiche] = useState<Niche>(NICHES[0]);
+  const [fbModalToken, setFbModalToken] = useState('');
+  const [fbModalFetching, setFbModalFetching] = useState(false);
+  const [fbModalPages, setFbModalPages] = useState<any[]>([]);
+  const [fbModalError, setFbModalError] = useState<string | null>(null);
+  const [fbModalLinking, setFbModalLinking] = useState<string | null>(null);
+  const [availableError, setAvailableError] = useState<string | null>(null);
+  const [refreshingAccounts, setRefreshingAccounts] = useState(false);
 
-  useEffect(() => {
-    fetchData();
-  }, []);
+  useEffect(() => { fetchData(); }, []);
 
   const fetchData = async () => {
     try {
-      const [accRes, fbRes, availableRes] = await Promise.all([
+      const [accRes, fbRes] = await Promise.all([
         fetch('/api/blogger-accounts').then(r => r.ok ? r.json() : []),
         fetch('/api/facebook-pages').then(r => r.ok ? r.json() : []),
-        fetch('/api/blogger/available-accounts').then(async r => r.ok ? r.json() : [])
       ]);
       setAccounts(accRes);
       setFacebookPages(fbRes);
-      setAvailableAccounts(availableRes);
     } catch (err) {
       console.error(err);
-      setAvailableAccounts([]);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchAvailableAccounts = async () => {
+    setRefreshingAccounts(true);
+    setAvailableError(null);
+    try {
+      const res = await fetch('/api/blogger/available-accounts');
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableAccounts(Array.isArray(data) ? data : []);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setAvailableError(err.error || 'Failed to fetch Blogger accounts. Please verify your OAuth credentials in Settings.');
+      }
+    } catch (err: any) {
+      setAvailableError(err.message || 'Network error');
+    } finally {
+      setRefreshingAccounts(false);
     }
   };
 
@@ -321,165 +342,421 @@ const BloggerAccounts = () => {
 
   const handleConnectAccount = async () => {
     if (!connectTarget) return;
-
     try {
       const res = await fetch('/api/blogger-accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          blogger_id: connectTarget.blogger_id,
-          name: connectTarget.name,
-          url: connectTarget.url,
-          niche: selectedNiche,
-          status: 'connected'
-        })
+        body: JSON.stringify({ blogger_id: connectTarget.blogger_id, name: connectTarget.name, url: connectTarget.url, niche: selectedNiche, status: 'connected' })
       });
-      if (res.ok) {
-        setConnectTarget(null);
-        await fetchData();
-      }
-    } catch (err) {
-      console.error(err);
-    }
+      if (res.ok) { setConnectTarget(null); await fetchData(); }
+    } catch (err) { console.error(err); }
   };
 
   const handleDisconnect = async (account: BloggerAccount) => {
-    if (!confirm(`Disconnect ${account.name}?`)) return;
+    if (!confirm(`Disconnect "${account.name}"?`)) return;
     try {
       await fetch(`/api/blogger-accounts/${account.id}`, { method: 'DELETE' });
       await fetchData();
-    } catch (err) {
-      console.error(err);
-    }
+    } catch (err) { console.error(err); }
   };
 
-  const handleConnectFb = async (bloggerAccountId: string, facebookPageId: string) => {
+  const handleConnectFb = async (bloggerAccountId: string, facebookPageDbId: string) => {
     try {
       const res = await fetch(`/api/blogger-accounts/${bloggerAccountId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ facebook_page_id: facebookPageId })
+        body: JSON.stringify({ facebook_page_id: facebookPageDbId })
+      });
+      if (res.ok) { setShowConnectFbModal(null); setFbModalPages([]); setFbModalToken(''); fetchData(); }
+    } catch (err) { console.error(err); }
+  };
+
+  const handleFetchPagesFromToken = async () => {
+    if (!fbModalToken.trim()) return;
+    setFbModalFetching(true);
+    setFbModalError(null);
+    setFbModalPages([]);
+    try {
+      const res = await fetch('/api/facebook/pages-from-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: fbModalToken.trim() })
       });
       if (res.ok) {
-        setShowConnectFbModal(null);
-        fetchData();
+        const payload = await res.json();
+        setFbModalPages(payload.pages || []);
+        if ((payload.pages || []).length === 0) setFbModalError('No pages found for this token. Make sure you have admin access to Facebook pages.');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setFbModalError(err.error || 'Failed to fetch pages. Check your access token.');
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setFbModalError(err.message || 'Network error');
+    } finally {
+      setFbModalFetching(false);
     }
   };
 
-  if (loading) return <div className="flex-1 p-8 flex items-center justify-center"><RefreshCw className="animate-spin text-indigo-500" /></div>;
+  const handleLinkFetchedPage = async (bloggerAccountId: string, page: any) => {
+    setFbModalLinking(page.id);
+    try {
+      const existing = facebookPages.find(p => p.page_id === page.id);
+      let dbId = existing?.id;
+      if (!dbId) {
+        const res = await fetch('/api/facebook-pages', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ page_id: page.id, name: page.name, access_token: page.access_token || fbModalToken.trim(), status: 'valid' })
+        });
+        if (res.ok) { const newPage = await res.json(); dbId = newPage.id; }
+      }
+      if (dbId) await handleConnectFb(bloggerAccountId, dbId);
+    } catch (err) { console.error(err); }
+    finally { setFbModalLinking(null); }
+  };
+
+  const openFbModal = (accountId: string) => {
+    setShowConnectFbModal(accountId);
+    setFbModalToken('');
+    setFbModalPages([]);
+    setFbModalError(null);
+  };
+
+  const linkedPageName = (acc: BloggerAccount) => {
+    if (!acc.facebook_page_id) return null;
+    return facebookPages.find(p => p.id === acc.facebook_page_id)?.name || null;
+  };
+
+  if (loading) return (
+    <div className="flex-1 flex items-center justify-center min-h-[60vh]">
+      <div className="flex flex-col items-center gap-3">
+        <RefreshCw className="animate-spin text-indigo-500 w-8 h-8" />
+        <p className="text-zinc-500 text-sm">Loading accounts...</p>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="flex-1 p-8 space-y-8">
-      <header>
-        <h2 className="text-3xl font-bold text-white tracking-tight">Blogger Accounts</h2>
-        <p className="text-zinc-400 mt-1">Manage your connected blogs and link them to Facebook pages.</p>
-      </header>
-
-      <section className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 space-y-4">
-        <h3 className="text-xl font-bold text-white">Available Blogger Accounts</h3>
-        {availableAccounts.length === 0 && (
-          <p className="text-zinc-500">No Blogger accounts found. Save valid Blogger OAuth credentials in Settings, then refresh.</p>
-        )}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {availableAccounts.map((blog) => {
-            const connected = connectedByBloggerId.has(blog.blogger_id);
-            return (
-              <div key={blog.blogger_id} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 gap-4">
-                <div>
-                  <p className="text-white font-bold">{blog.name}</p>
-                  <p className="text-zinc-500 text-xs font-mono">{blog.blogger_id}</p>
-                  <a href={blog.url} target="_blank" rel="noreferrer" className="text-indigo-400 text-xs hover:text-indigo-300 break-all">{blog.url}</a>
-                </div>
-                <button
-                  onClick={() => {
-                    if (!connected) {
-                      setSelectedNiche(NICHES[0]);
-                      setConnectTarget(blog);
-                    }
-                  }}
-                  disabled={connected}
-                  className={cn(
-                    "px-4 py-2 rounded-xl text-sm font-bold",
-                    connected ? "bg-emerald-500/10 text-emerald-500 cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-500"
-                  )}
-                >
-                  {connected ? 'Connected' : 'Connect'}
-                </button>
-              </div>
-            );
-          })}
+    <div className="flex-1 p-4 sm:p-6 lg:p-8 space-y-6 lg:space-y-8 max-w-7xl mx-auto w-full">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">Blogger Accounts</h2>
+          <p className="text-zinc-400 mt-1 text-sm sm:text-base">Connect blogs and link them to Facebook pages for cross-posting.</p>
         </div>
-      </section>
+        <button
+          onClick={fetchAvailableAccounts}
+          disabled={refreshingAccounts}
+          className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-2xl transition-all shadow-lg shadow-indigo-500/20 disabled:opacity-60 text-sm self-start sm:self-auto"
+        >
+          <RefreshCw className={cn("w-4 h-4", refreshingAccounts && "animate-spin")} />
+          {refreshingAccounts ? 'Fetching...' : 'Fetch Blogs'}
+        </button>
+      </div>
 
-      <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {accounts.map((acc) => (
-          <motion.div
-            layout
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            key={acc.id}
-            className="bg-zinc-900 border border-zinc-800 rounded-3xl p-6 shadow-xl flex flex-col"
-          >
-            <div className="flex items-center justify-between mb-4">
-              <div className="w-12 h-12 bg-orange-500/10 rounded-2xl flex items-center justify-center">
-                <Globe className="text-orange-500 w-6 h-6" />
+      {/* Available Blogger Accounts */}
+      {(availableAccounts.length > 0 || availableError) && (
+        <section className="bg-zinc-900 border border-zinc-800 rounded-2xl sm:rounded-3xl overflow-hidden shadow-xl">
+          <div className="p-4 sm:p-6 border-b border-zinc-800 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 bg-orange-500/10 rounded-xl flex items-center justify-center">
+                <Globe className="w-4 h-4 text-orange-500" />
               </div>
-              <span className={cn("px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider", acc.status === 'connected' ? "bg-emerald-500/10 text-emerald-500" : "bg-rose-500/10 text-rose-500")}>{acc.status}</span>
+              <h3 className="text-base sm:text-lg font-bold text-white">Available Blogs</h3>
             </div>
-            <h3 className="text-xl font-bold text-white">{acc.name}</h3>
-            <p className="text-zinc-500 text-sm font-mono mt-1">ID: {acc.blogger_id}</p>
-            <a href={acc.url} target="_blank" rel="noreferrer" className="text-indigo-400 text-xs mt-2 hover:text-indigo-300 break-all">{acc.url}</a>
-            <p className="text-indigo-400 text-sm mt-2">{acc.niche}</p>
-
-            <div className="mt-6 pt-6 border-t border-zinc-800 flex flex-col gap-3">
-              <button onClick={() => setShowConnectFbModal(acc.id)} className="w-full py-3 rounded-2xl bg-zinc-800 text-zinc-300 font-bold text-sm hover:bg-zinc-700 transition-colors flex items-center justify-center gap-2">
-                <Facebook className="w-4 h-4" /> Connect Facebook Page
-              </button>
-              <button onClick={() => handleDisconnect(acc)} className="w-full py-3 rounded-2xl bg-rose-500/10 text-rose-400 font-bold text-sm hover:bg-rose-500/20 transition-colors">
-                Disconnect Blogger Account
-              </button>
+            <span className="text-xs text-zinc-500 bg-zinc-800 px-3 py-1 rounded-full font-medium">{availableAccounts.length} found</span>
+          </div>
+          {availableError && (
+            <div className="m-4 sm:m-6 p-4 bg-rose-500/10 border border-rose-500/20 rounded-2xl flex items-start gap-3">
+              <XCircle className="w-5 h-5 text-rose-400 flex-shrink-0 mt-0.5" />
+              <p className="text-rose-400 text-sm">{availableError}</p>
             </div>
-          </motion.div>
-        ))}
-      </section>
+          )}
+          <div className="p-4 sm:p-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {availableAccounts.map((blog) => {
+              const connected = connectedByBloggerId.has(blog.blogger_id);
+              return (
+                <div key={blog.blogger_id} className={cn(
+                  "bg-zinc-950/60 border rounded-2xl p-4 flex items-start justify-between gap-3 transition-all",
+                  connected ? "border-emerald-500/20" : "border-zinc-800 hover:border-zinc-700"
+                )}>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <p className="text-white font-semibold text-sm truncate">{blog.name}</p>
+                      {connected && <span className="flex-shrink-0 text-[10px] bg-emerald-500/10 text-emerald-500 px-2 py-0.5 rounded-full font-bold uppercase">Connected</span>}
+                    </div>
+                    <p className="text-zinc-600 text-[11px] font-mono truncate">{blog.blogger_id}</p>
+                    <a href={blog.url} target="_blank" rel="noreferrer" className="text-indigo-400 text-xs hover:text-indigo-300 truncate block mt-1">{blog.url}</a>
+                  </div>
+                  <button
+                    onClick={() => { if (!connected) { setSelectedNiche(NICHES[0]); setConnectTarget(blog); } }}
+                    disabled={connected}
+                    className={cn(
+                      "flex-shrink-0 px-3 py-1.5 rounded-xl text-xs font-bold transition-all",
+                      connected ? "bg-emerald-500/10 text-emerald-500 cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-500"
+                    )}
+                  >
+                    {connected ? <Check className="w-4 h-4" /> : 'Connect'}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
+      {/* Welcome state when no accounts connected */}
+      {accounts.length === 0 && (
+        <div className="bg-zinc-900 border border-dashed border-zinc-700 rounded-2xl sm:rounded-3xl p-8 sm:p-12 flex flex-col items-center text-center gap-4">
+          <div className="w-16 h-16 bg-indigo-500/10 rounded-2xl flex items-center justify-center">
+            <Globe className="w-8 h-8 text-indigo-400" />
+          </div>
+          <div>
+            <h3 className="text-white font-bold text-lg">No Blogs Connected Yet</h3>
+            <p className="text-zinc-500 text-sm mt-1 max-w-sm">Click <span className="text-indigo-400 font-semibold">Fetch Blogs</span> to load your Blogger accounts, or first add OAuth credentials in Settings.</p>
+          </div>
+        </div>
+      )}
+
+      {/* Connected Accounts Grid */}
+      {accounts.length > 0 && (
+        <section>
+          <div className="flex items-center gap-2 mb-4">
+            <h3 className="text-base sm:text-lg font-bold text-white">Connected Accounts</h3>
+            <span className="text-xs text-zinc-500 bg-zinc-800 px-2.5 py-0.5 rounded-full">{accounts.length}</span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4 sm:gap-6">
+            {accounts.map((acc) => {
+              const linked = linkedPageName(acc);
+              return (
+                <motion.div
+                  layout
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  key={acc.id}
+                  className="bg-zinc-900 border border-zinc-800 rounded-2xl sm:rounded-3xl p-5 sm:p-6 shadow-xl flex flex-col gap-4 hover:border-zinc-700 transition-all"
+                >
+                  {/* Card Header */}
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="w-11 h-11 bg-orange-500/10 rounded-2xl flex items-center justify-center flex-shrink-0">
+                      <Globe className="text-orange-500 w-5 h-5" />
+                    </div>
+                    <span className={cn(
+                      "text-[10px] px-2.5 py-1 rounded-full font-bold uppercase tracking-wider flex-shrink-0",
+                      acc.status === 'connected' ? "bg-emerald-500/10 text-emerald-500" : "bg-rose-500/10 text-rose-500"
+                    )}>{acc.status}</span>
+                  </div>
+
+                  {/* Blog Info */}
+                  <div className="space-y-1 flex-1">
+                    <h3 className="text-base sm:text-lg font-bold text-white leading-tight">{acc.name}</h3>
+                    <p className="text-zinc-500 text-xs font-mono">ID: {acc.blogger_id}</p>
+                    <a href={acc.url} target="_blank" rel="noreferrer" className="text-indigo-400 text-xs hover:text-indigo-300 break-all block">{acc.url}</a>
+                    <span className="inline-block mt-1 text-xs bg-indigo-500/10 text-indigo-400 px-2 py-0.5 rounded-lg font-medium">{acc.niche}</span>
+                  </div>
+
+                  {/* Facebook Status */}
+                  <div className={cn(
+                    "rounded-xl px-3 py-2 flex items-center gap-2",
+                    linked ? "bg-blue-500/10 border border-blue-500/20" : "bg-zinc-800/50"
+                  )}>
+                    <Facebook className={cn("w-4 h-4 flex-shrink-0", linked ? "text-blue-400" : "text-zinc-600")} />
+                    <span className={cn("text-xs font-medium truncate", linked ? "text-blue-300" : "text-zinc-500")}>
+                      {linked ? linked : 'No Facebook page linked'}
+                    </span>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="flex flex-col gap-2 pt-1 border-t border-zinc-800">
+                    <button
+                      onClick={() => openFbModal(acc.id)}
+                      className="w-full py-2.5 rounded-xl bg-zinc-800 text-zinc-300 font-semibold text-sm hover:bg-zinc-700 hover:text-white transition-all flex items-center justify-center gap-2"
+                    >
+                      <Facebook className="w-4 h-4 text-blue-400" />
+                      {linked ? 'Change Facebook Page' : 'Connect Facebook Page'}
+                    </button>
+                    <button
+                      onClick={() => handleDisconnect(acc)}
+                      className="w-full py-2.5 rounded-xl bg-rose-500/8 text-rose-400 font-semibold text-sm hover:bg-rose-500/15 transition-all"
+                    >
+                      Disconnect Blog
+                    </button>
+                  </div>
+                </motion.div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* Connect Blogger Account Modal */}
       <AnimatePresence>
         {connectTarget && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setConnectTarget(null)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
-            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden p-6 space-y-6">
-              <h3 className="text-xl font-bold text-white">Connect {connectTarget.name}</h3>
-              <div className="space-y-2">
-                <label className="text-sm font-medium text-zinc-400">Select Niche</label>
-                <select value={selectedNiche} onChange={(e) => setSelectedNiche(e.target.value as Niche)} className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white">
-                  {NICHES.map(n => <option key={n} value={n}>{n}</option>)}
-                </select>
+            <motion.div
+              initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 40 }}
+              className="relative bg-zinc-900 border border-zinc-800 w-full sm:max-w-md rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="sm:hidden w-10 h-1 bg-zinc-700 rounded-full mx-auto mt-3 mb-1" />
+              <div className="p-5 sm:p-6 border-b border-zinc-800 flex items-center justify-between">
+                <div>
+                  <h3 className="text-lg font-bold text-white">Connect Blog</h3>
+                  <p className="text-zinc-500 text-sm mt-0.5 truncate max-w-[260px]">{connectTarget.name}</p>
+                </div>
+                <button onClick={() => setConnectTarget(null)} className="text-zinc-500 hover:text-white p-1.5 rounded-xl hover:bg-zinc-800 transition-all"><X className="w-5 h-5" /></button>
               </div>
-              <button onClick={handleConnectAccount} className="w-full bg-indigo-600 text-white py-3 rounded-2xl font-bold hover:bg-indigo-500">Connect Account</button>
+              <div className="p-5 sm:p-6 space-y-5">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Content Niche</label>
+                  <select
+                    value={selectedNiche}
+                    onChange={(e) => setSelectedNiche(e.target.value as Niche)}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white text-sm focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all appearance-none"
+                  >
+                    {NICHES.map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </div>
+                <button
+                  onClick={handleConnectAccount}
+                  className="w-full bg-indigo-600 text-white py-3.5 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20 text-sm"
+                >
+                  Connect Account
+                </button>
+              </div>
             </motion.div>
           </div>
         )}
       </AnimatePresence>
 
+      {/* Connect Facebook Page Modal */}
       <AnimatePresence>
         {showConnectFbModal && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => setShowConnectFbModal(null)} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
-            <motion.div initial={{ opacity: 0, scale: 0.9, y: 20 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9, y: 20 }} className="relative bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-3xl shadow-2xl overflow-hidden">
-              <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
-                <h3 className="text-xl font-bold text-white">Connect Facebook Page</h3>
-                <button onClick={() => setShowConnectFbModal(null)} className="text-zinc-500 hover:text-white"><X className="w-6 h-6" /></button>
+          <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center p-0 sm:p-4">
+            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onClick={() => { setShowConnectFbModal(null); setFbModalPages([]); setFbModalToken(''); }} className="absolute inset-0 bg-black/80 backdrop-blur-sm" />
+            <motion.div
+              initial={{ opacity: 0, y: 40 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 40 }}
+              className="relative bg-zinc-900 border border-zinc-800 w-full sm:max-w-lg rounded-t-3xl sm:rounded-3xl shadow-2xl overflow-hidden max-h-[92vh] flex flex-col"
+            >
+              <div className="sm:hidden w-10 h-1 bg-zinc-700 rounded-full mx-auto mt-3 mb-1 flex-shrink-0" />
+              {/* Modal Header */}
+              <div className="p-5 sm:p-6 border-b border-zinc-800 flex items-center justify-between flex-shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 bg-blue-500/10 rounded-xl flex items-center justify-center">
+                    <Facebook className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-white">Connect Facebook Page</h3>
+                    <p className="text-zinc-500 text-xs mt-0.5">Enter your token to find available pages</p>
+                  </div>
+                </div>
+                <button onClick={() => { setShowConnectFbModal(null); setFbModalPages([]); setFbModalToken(''); }} className="text-zinc-500 hover:text-white p-1.5 rounded-xl hover:bg-zinc-800 transition-all"><X className="w-5 h-5" /></button>
               </div>
-              <div className="p-6 space-y-4">
-                {facebookPages.length === 0 ? <p className="text-zinc-500">No Facebook pages found.</p> : facebookPages.map(page => (
-                  <button key={page.id} onClick={() => handleConnectFb(showConnectFbModal, page.id)} className="w-full flex items-center justify-between p-4 bg-zinc-950 border border-zinc-800 rounded-2xl hover:border-indigo-500 transition-all group">
-                    <span className="text-white font-medium">{page.name}</span>
-                    <ChevronRight className="w-5 h-5 text-zinc-600 group-hover:text-indigo-400" />
-                  </button>
-                ))}
+
+              {/* Scrollable Body */}
+              <div className="overflow-y-auto flex-1 p-5 sm:p-6 space-y-5">
+                {/* Token Input */}
+                <div className="space-y-3">
+                  <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Facebook Access Token</label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={fbModalToken}
+                      onChange={(e) => setFbModalToken(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleFetchPagesFromToken()}
+                      placeholder="Paste your User or Page access token..."
+                      className="flex-1 bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 transition-all min-w-0"
+                    />
+                    <button
+                      onClick={handleFetchPagesFromToken}
+                      disabled={fbModalFetching || !fbModalToken.trim()}
+                      className="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white px-4 py-3 rounded-2xl font-bold text-sm transition-all disabled:opacity-50 flex items-center gap-2"
+                    >
+                      {fbModalFetching ? <RefreshCw className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                      Fetch
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-zinc-600">Get a User Access Token from <span className="text-zinc-400">developers.facebook.com/tools/explorer</span> with <span className="text-zinc-400">pages_show_list</span> permission.</p>
+                </div>
+
+                {/* Error */}
+                {fbModalError && (
+                  <div className="p-3 bg-rose-500/10 border border-rose-500/20 rounded-xl flex items-start gap-2">
+                    <XCircle className="w-4 h-4 text-rose-400 flex-shrink-0 mt-0.5" />
+                    <p className="text-rose-400 text-sm">{fbModalError}</p>
+                  </div>
+                )}
+
+                {/* Fetched Pages from Token */}
+                {fbModalPages.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-500" />
+                      <h4 className="text-sm font-bold text-emerald-400">{fbModalPages.length} Page{fbModalPages.length !== 1 ? 's' : ''} Found</h4>
+                    </div>
+                    <div className="space-y-2">
+                      {fbModalPages.map(page => (
+                        <div key={page.id} className="bg-zinc-950/80 border border-zinc-800 rounded-2xl p-4 flex items-center justify-between gap-3 hover:border-blue-500/40 transition-all group">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-9 h-9 bg-blue-500/10 rounded-xl flex items-center justify-center flex-shrink-0">
+                              <Facebook className="w-4 h-4 text-blue-400" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-white font-semibold text-sm truncate">{page.name}</p>
+                              <p className="text-zinc-500 text-xs font-mono">ID: {page.id}</p>
+                              {page.category && <p className="text-zinc-600 text-xs">{page.category}</p>}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => handleLinkFetchedPage(showConnectFbModal, page)}
+                            disabled={fbModalLinking === page.id}
+                            className="flex-shrink-0 bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 rounded-xl text-xs font-bold transition-all disabled:opacity-60 flex items-center gap-1.5"
+                          >
+                            {fbModalLinking === page.id ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                            Link
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Saved Pages Section */}
+                {facebookPages.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="h-px bg-zinc-800" />
+                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">Or Link a Saved Page</h4>
+                    <div className="space-y-2">
+                      {facebookPages.map(page => (
+                        <button
+                          key={page.id}
+                          onClick={() => handleConnectFb(showConnectFbModal, page.id)}
+                          className="w-full flex items-center justify-between p-3.5 bg-zinc-950 border border-zinc-800 rounded-2xl hover:border-indigo-500/50 transition-all group text-left"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-8 h-8 bg-indigo-500/10 rounded-xl flex items-center justify-center flex-shrink-0">
+                              <Facebook className="w-4 h-4 text-indigo-400" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-white font-medium text-sm truncate">{page.name}</p>
+                              <div className="flex items-center gap-1.5 mt-0.5">
+                                <div className={cn("w-1.5 h-1.5 rounded-full", page.status === 'valid' ? 'bg-emerald-500' : 'bg-rose-500')} />
+                                <span className="text-[10px] text-zinc-500 uppercase font-bold">{page.status}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-zinc-600 group-hover:text-indigo-400 flex-shrink-0 transition-colors" />
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {facebookPages.length === 0 && fbModalPages.length === 0 && !fbModalFetching && !fbModalError && (
+                  <div className="py-6 text-center text-zinc-500 text-sm">
+                    Enter a Facebook access token above to fetch and connect your pages.
+                  </div>
+                )}
               </div>
             </motion.div>
           </div>
@@ -777,6 +1054,9 @@ const Settings = () => {
   const [fetchingFb, setFetchingFb] = useState(false);
   const [supabaseStatus, setSupabaseStatus] = useState<'idle' | 'verifying' | 'connected' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [elApiKey, setElApiKey] = useState('');
+  const [cerebrasApiKey, setCerebrasApiKey] = useState('');
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const maskValue = (value?: string, start = 6, end = 4) => {
     if (!value) return 'Not set';
     if (value.length <= start + end) return '•'.repeat(Math.max(value.length, 8));
@@ -1047,46 +1327,116 @@ const Settings = () => {
     { id: 'ads', label: 'Ads Settings', icon: Layout },
   ];
 
-  if (loading) return <div className="flex-1 p-8 flex items-center justify-center"><RefreshCw className="animate-spin text-indigo-500" /></div>;
+  if (loading) return (
+    <div className="flex-1 flex items-center justify-center min-h-[60vh]">
+      <div className="flex flex-col items-center gap-3">
+        <RefreshCw className="animate-spin text-indigo-500 w-8 h-8" />
+        <p className="text-zinc-500 text-sm">Loading settings...</p>
+      </div>
+    </div>
+  );
+
+  const activeItem = menuItems.find(m => m.id === activeSubTab);
 
   return (
     <div className="flex-1 flex flex-col lg:flex-row min-h-screen bg-black">
-      {/* Settings Sub-Nav */}
-      <div className="w-full lg:w-72 bg-zinc-950/80 backdrop-blur-md lg:bg-zinc-950 border-b lg:border-b-0 lg:border-r border-zinc-800 p-4 lg:p-6 flex lg:flex-col gap-2 overflow-x-auto lg:overflow-y-auto lg:max-h-screen sticky top-[64px] lg:top-0 z-30 no-scrollbar">
-        <div className="hidden lg:block mb-8">
-          <h2 className="text-2xl font-bold text-white tracking-tight">Settings</h2>
-          <p className="text-zinc-500 text-sm mt-1">Configure your platform.</p>
+      {/* Desktop Sidebar Nav */}
+      <div className="hidden lg:flex w-64 xl:w-72 bg-zinc-950 border-r border-zinc-800/80 flex-col sticky top-0 h-screen overflow-y-auto no-scrollbar">
+        <div className="p-6 pb-4 border-b border-zinc-800/60">
+          <div className="flex items-center gap-3 mb-1">
+            <div className="w-8 h-8 bg-indigo-500/10 rounded-xl flex items-center justify-center">
+              <SettingsIcon className="w-4 h-4 text-indigo-400" />
+            </div>
+            <h2 className="text-lg font-bold text-white tracking-tight">Settings</h2>
+          </div>
+          <p className="text-zinc-500 text-xs ml-11">Configure your platform</p>
         </div>
-        
-        <div className="flex lg:flex-col gap-2 min-w-max lg:min-w-0">
+        <nav className="flex-1 p-3 space-y-1 py-4">
           {menuItems.map((item) => (
             <button
               key={item.id}
               onClick={() => setActiveSubTab(item.id)}
               className={cn(
-                "flex items-center gap-3 px-4 py-2.5 lg:py-3 rounded-xl transition-all duration-200 group whitespace-nowrap",
-                activeSubTab === item.id 
-                  ? "bg-indigo-600 lg:bg-zinc-800 text-white border border-indigo-500 lg:border-zinc-700 shadow-lg shadow-indigo-500/20 lg:shadow-none" 
+                "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 group text-left",
+                activeSubTab === item.id
+                  ? "bg-indigo-600/10 text-indigo-300 border border-indigo-500/20"
                   : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300 border border-transparent"
               )}
             >
-              <item.icon className={cn("w-4 h-4 lg:w-5 lg:h-5", activeSubTab === item.id ? "text-white lg:text-indigo-500" : "text-zinc-600 group-hover:text-zinc-400")} />
-              <span className="font-semibold text-xs lg:text-sm">{item.label}</span>
+              <div className={cn(
+                "w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 transition-all",
+                activeSubTab === item.id ? "bg-indigo-500/20" : "bg-zinc-800/60 group-hover:bg-zinc-700/60"
+              )}>
+                <item.icon className={cn("w-4 h-4", activeSubTab === item.id ? "text-indigo-400" : "text-zinc-500 group-hover:text-zinc-400")} />
+              </div>
+              <span className={cn("font-semibold text-sm truncate", activeSubTab === item.id ? "text-white" : "")}>{item.label}</span>
+              {activeSubTab === item.id && <div className="ml-auto w-1.5 h-1.5 rounded-full bg-indigo-500 flex-shrink-0" />}
             </button>
           ))}
-        </div>
+        </nav>
+      </div>
+
+      {/* Mobile Nav - Sticky tab bar */}
+      <div className="lg:hidden sticky top-[57px] z-30 bg-zinc-950/95 backdrop-blur-md border-b border-zinc-800">
+        {/* Current section header with dropdown toggle */}
+        <button
+          onClick={() => setMobileNavOpen(!mobileNavOpen)}
+          className="w-full flex items-center justify-between px-4 py-3"
+        >
+          <div className="flex items-center gap-3">
+            {activeItem && (
+              <div className="w-7 h-7 bg-indigo-500/10 rounded-lg flex items-center justify-center">
+                <activeItem.icon className="w-3.5 h-3.5 text-indigo-400" />
+              </div>
+            )}
+            <span className="text-white font-semibold text-sm">{activeItem?.label || 'Settings'}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-zinc-500 text-xs">Change section</span>
+            <ChevronRight className={cn("w-4 h-4 text-zinc-500 transition-transform", mobileNavOpen && "rotate-90")} />
+          </div>
+        </button>
+        {/* Mobile dropdown */}
+        <AnimatePresence>
+          {mobileNavOpen && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="overflow-hidden border-t border-zinc-800"
+            >
+              <div className="p-2 grid grid-cols-2 gap-1.5 max-h-64 overflow-y-auto">
+                {menuItems.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => { setActiveSubTab(item.id); setMobileNavOpen(false); }}
+                    className={cn(
+                      "flex items-center gap-2 px-3 py-2.5 rounded-xl transition-all text-left",
+                      activeSubTab === item.id
+                        ? "bg-indigo-600/15 text-indigo-300 border border-indigo-500/20"
+                        : "text-zinc-400 hover:bg-zinc-800 border border-transparent"
+                    )}
+                  >
+                    <item.icon className={cn("w-4 h-4 flex-shrink-0", activeSubTab === item.id ? "text-indigo-400" : "text-zinc-600")} />
+                    <span className="text-xs font-semibold truncate">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Settings Content */}
-      <div className="flex-1 p-4 lg:p-12 overflow-y-auto">
+      <div className="flex-1 p-4 sm:p-6 lg:p-10 overflow-y-auto">
+        <div className="max-w-3xl mx-auto">
         <AnimatePresence mode="wait">
           <motion.div
             key={activeSubTab}
-            initial={{ opacity: 0, y: 10 }}
+            initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.2 }}
-            className="max-w-6xl mx-auto"
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.18 }}
           >
             {error && (
               <motion.div 
@@ -1615,23 +1965,25 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">New API Key</label>
                     <div className="flex flex-col sm:flex-row gap-4">
                       <input 
-                        type="password" 
-                        id="el-api-key"
+                        type="password"
+                        value={elApiKey}
+                        onChange={(e) => setElApiKey(e.target.value)}
                         placeholder="Enter ElevenLabs API Key..."
                         className="flex-1 bg-zinc-950 border border-zinc-800 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-indigo-500 transition-all text-lg"
                       />
                       <button 
                         onClick={() => {
-                          const key = (document.getElementById('el-api-key') as HTMLInputElement).value;
-                          if (key) {
-                            const newKeys = [...(settings.elevenlabs_keys || []), { key, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
+                          if (elApiKey.trim()) {
+                            const newKeys = [...(settings.elevenlabs_keys || []), { key: elApiKey.trim(), success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
                             saveSection('elevenlabs', { elevenlabs_keys: newKeys });
-                            (document.getElementById('el-api-key') as HTMLInputElement).value = '';
+                            setElApiKey('');
                           }
                         }}
-                        className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20 whitespace-nowrap"
+                        disabled={!elApiKey.trim() || saving === 'elevenlabs'}
+                        className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20 whitespace-nowrap disabled:opacity-50 flex items-center gap-2 justify-center"
                       >
-                        Save API Key
+                        {saving === 'elevenlabs' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+                        Save Key
                       </button>
                     </div>
                   </div>
@@ -1705,23 +2057,25 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">New API Key</label>
                     <div className="flex flex-col sm:flex-row gap-4">
                       <input 
-                        type="password" 
-                        id="cerebras-api-key"
+                        type="password"
+                        value={cerebrasApiKey}
+                        onChange={(e) => setCerebrasApiKey(e.target.value)}
                         placeholder="Enter Cerebras AI API Key..."
                         className="flex-1 bg-zinc-950 border border-zinc-800 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-indigo-500 transition-all text-lg"
                       />
                       <button 
                         onClick={() => {
-                          const key = (document.getElementById('cerebras-api-key') as HTMLInputElement).value;
-                          if (key) {
-                            const newKeys = [...(settings.cerebras_keys || []), { key, success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
+                          if (cerebrasApiKey.trim()) {
+                            const newKeys = [...(settings.cerebras_keys || []), { key: cerebrasApiKey.trim(), success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
                             saveSection('cerebras', { cerebras_keys: newKeys });
-                            (document.getElementById('cerebras-api-key') as HTMLInputElement).value = '';
+                            setCerebrasApiKey('');
                           }
                         }}
-                        className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20 whitespace-nowrap"
+                        disabled={!cerebrasApiKey.trim() || saving === 'cerebras'}
+                        className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20 whitespace-nowrap disabled:opacity-50 flex items-center gap-2 justify-center"
                       >
-                        Save API Key
+                        {saving === 'cerebras' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+                        Save Key
                       </button>
                     </div>
                   </div>
@@ -1926,6 +2280,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
             )}
           </motion.div>
         </AnimatePresence>
+        </div>
       </div>
     </div>
   );
