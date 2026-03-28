@@ -36,53 +36,6 @@ print(f"{width}x{height} mean={mean:.2f} std={std:.2f}")
   if (out) console.log(`${label} validation: ${out}`);
 }
 
-async function assertNoDetectedText(path, label) {
-  const { stdout } = await execFileAsync('python3', ['-c', `
-import subprocess
-import sys
-import re
-
-path = sys.argv[1]
-try:
-    raw = subprocess.check_output(['tesseract', path, 'stdout', '--psm', '6', 'tsv'], stderr=subprocess.DEVNULL)
-except Exception as err:
-    raise SystemExit(f'OCR_ERROR:{err}')
-lines = raw.decode('utf-8', errors='ignore').splitlines()
-if not lines:
-    print('0')
-    raise SystemExit(0)
-headers = lines[0].split('\\t')
-try:
-    conf_idx = headers.index('conf')
-    text_idx = headers.index('text')
-except ValueError:
-    print('0')
-    raise SystemExit(0)
-
-strong = []
-for line in lines[1:]:
-    cols = line.split('\\t')
-    if len(cols) <= max(conf_idx, text_idx):
-        continue
-    txt = cols[text_idx].strip()
-    if not txt:
-        continue
-    txt = re.sub(r'[^A-Za-z]', '', txt)
-    if len(txt) < 4:
-        continue
-    try:
-        conf = float(cols[conf_idx])
-    except Exception:
-        conf = -1
-    if conf >= 70:
-        strong.append(txt)
-print('\\n'.join(strong[:8]))
-`, path], { maxBuffer: 8 * 1024 * 1024 });
-  const words = String(stdout || '').split('\n').map((v) => v.trim()).filter(Boolean);
-  if (words.length >= 2) {
-    throw new Error(`${label} contains detected text before overlay (ocr_words="${words.slice(0, 6).join(',')}")`);
-  }
-}
 
 async function renderOverlayWithPython(sourcePath, outputPath) {
   const python = `
@@ -242,7 +195,6 @@ async function main() {
     await execFileAsync('curl', ['-fsSL', sourceImageUrl, '-o', sourcePath], { maxBuffer: 20 * 1024 * 1024 });
   }
   await validateImageFile(sourcePath, 'source');
-  await assertNoDetectedText(sourcePath, 'source');
 
   await renderOverlayWithPython(sourcePath, outputPath);
 

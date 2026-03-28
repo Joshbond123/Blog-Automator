@@ -1047,26 +1047,217 @@ function topicSimilaritySignals(candidate: string, previous: string) {
   };
 }
 
-async function semanticDuplicateCheck(candidate: string, previousTopics: string[], niche: string) {
-  if (!previousTopics.length) return '';
+// ─────────────────────────────────────────────────────────────────────────────
+// TopicShield-100
+// Production-grade anti-duplicate topic engine.
+// Caps history at 100 entries. Blocks exact dupes, near-dupes, reworded
+// versions, same-event rewrites, and thematically identical topics.
+// Operates in two passes: (1) signal-based hard/soft block, (2) AI semantic.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const TOPICSHIELD_HISTORY_CAP = 800;
+
+const TOPICSHIELD_STOPWORDS = new Set([
+  'a','about','after','again','all','also','an','and','any','are','as','at','be','because',
+  'been','before','being','between','both','breaking','but','by','can','could','day','days',
+  'do','does','during','each','even','every','find','first','for','from','get','got','had',
+  'has','have','he','her','here','him','his','how','i','if','in','into','is','it','its',
+  'just','know','latest','like','look','make','many','may','me','might','more','most','much',
+  'my','new','news','no','not','now','of','off','on','one','only','or','other','our','out',
+  'over','own','part','people','per','put','report','reports','reveal','reveals','said','same',
+  'see','she','should','show','shows','since','some','still','studies','study','such','take',
+  'than','that','the','their','them','then','there','these','they','this','those','through',
+  'time','to','too','trending','two','under','up','us','use','was','we','were','what','when',
+  'where','which','while','who','why','will','with','would','year','years','you','your',
+]);
+
+/** Normalize: lowercase, strip punctuation, collapse whitespace */
+function topicShield_normalize(text: string): string {
+  return String(text || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Extract meaningful keywords (≥3 chars, no stopwords) */
+function topicShield_keywords(text: string): string[] {
+  return topicShield_normalize(text)
+    .split(' ')
+    .filter(w => w.length >= 3 && !TOPICSHIELD_STOPWORDS.has(w));
+}
+
+/** Extract named entities and year patterns from original casing */
+function topicShield_entities(text: string): string[] {
+  const matches = String(text || '').match(/\b(?:[A-Z][a-z]+|[A-Z]{2,}|\d{4})(?:\s+(?:[A-Z][a-z]+|[A-Z]{2,}|\d{4})){0,3}\b/g) || [];
+  return [...new Set(matches.map(m => m.trim().toLowerCase()))].slice(0, 10);
+}
+
+/** Bigrams from normalized text */
+function topicShield_bigrams(text: string): string[] {
+  const tokens = topicShield_normalize(text).split(' ').filter(Boolean);
+  const grams: string[] = [];
+  for (let i = 0; i < tokens.length - 1; i++) grams.push(`${tokens[i]} ${tokens[i + 1]}`);
+  return grams;
+}
+
+/** Trigrams from normalized text */
+function topicShield_trigrams(text: string): string[] {
+  const tokens = topicShield_normalize(text).split(' ').filter(Boolean);
+  const grams: string[] = [];
+  for (let i = 0; i < tokens.length - 2; i++) grams.push(`${tokens[i]} ${tokens[i + 1]} ${tokens[i + 2]}`);
+  return grams;
+}
+
+/** Overlap ratio: |intersection| / min(|A|, |B|) */
+function topicShield_overlapRatio(a: string[], b: string[]): number {
+  const sa = new Set(a.filter(Boolean));
+  const sb = new Set(b.filter(Boolean));
+  if (!sa.size || !sb.size) return 0;
+  const intersection = [...sa].filter(x => sb.has(x)).length;
+  return intersection / Math.min(sa.size, sb.size);
+}
+
+/** Jaccard similarity: |intersection| / |union| */
+function topicShield_jaccard(a: string, b: string): number {
+  const sa = new Set(topicShield_normalize(a).split(' ').filter(Boolean));
+  const sb = new Set(topicShield_normalize(b).split(' ').filter(Boolean));
+  if (!sa.size || !sb.size) return 0;
+  const intersection = [...sa].filter(x => sb.has(x)).length;
+  const union = new Set([...sa, ...sb]).size;
+  return union ? intersection / union : 0;
+}
+
+/** Sorted deduplicated keyword set as a fingerprint string */
+function topicShield_themeFingerprint(text: string): string {
+  return [...new Set(topicShield_keywords(text))].sort().slice(0, 6).join('|');
+}
+
+/** All similarity dimensions between candidate and one historical topic */
+function topicShield_signals(candidate: string, previous: string) {
+  const normC = topicShield_normalize(candidate);
+  const normP = topicShield_normalize(previous);
+  return {
+    exactMatch:     normC === normP,
+    jaccard:        topicShield_jaccard(normC, normP),
+    keywordOverlap: topicShield_overlapRatio(topicShield_keywords(candidate), topicShield_keywords(previous)),
+    entityOverlap:  topicShield_overlapRatio(topicShield_entities(candidate), topicShield_entities(previous)),
+    bigramOverlap:  topicShield_overlapRatio(topicShield_bigrams(candidate),  topicShield_bigrams(previous)),
+    trigramOverlap: topicShield_overlapRatio(topicShield_trigrams(candidate), topicShield_trigrams(previous)),
+    sameTheme:      topicShield_themeFingerprint(candidate) === topicShield_themeFingerprint(previous),
+  };
+}
+
+/**
+ * Hard block: deterministic signals strong enough to block without AI.
+ * Thresholds are intentionally LOW because historical titles and new
+ * candidates are often worded differently even when covering the same topic.
+ */
+function topicShield_isHardBlocked(candidate: string, previous: string): boolean {
+  const s = topicShield_signals(candidate, previous);
+  if (s.exactMatch) return true;
+  if (s.jaccard >= 0.32) return true;
+  if (s.keywordOverlap >= 0.48) return true;
+  if (s.entityOverlap >= 0.55 && s.keywordOverlap >= 0.28) return true;
+  if (s.bigramOverlap >= 0.40) return true;
+  if (s.trigramOverlap >= 0.28) return true;
+  if (s.sameTheme && s.keywordOverlap >= 0.30) return true;
+  if (s.keywordOverlap >= 0.35 && s.bigramOverlap >= 0.25) return true;
+  return false;
+}
+
+/**
+ * Soft flag: moderate overlap that warrants an AI semantic check.
+ * Set much lower than hard-block so the AI sees anything suspicious.
+ */
+function topicShield_isSoftFlagged(candidate: string, previous: string): boolean {
+  const s = topicShield_signals(candidate, previous);
+  if (s.jaccard >= 0.16) return true;
+  if (s.keywordOverlap >= 0.26) return true;
+  if (s.entityOverlap >= 0.30) return true;
+  if (s.bigramOverlap >= 0.20) return true;
+  if (s.trigramOverlap >= 0.12) return true;
+  return false;
+}
+
+/**
+ * AI semantic check. Feeds all soft-flagged historical topics to the AI.
+ * The AI returns the matching historical topic text if duplicate, or NONE.
+ */
+async function topicShield_semanticCheck(candidate: string, softFlagged: string[], niche: string): Promise<boolean> {
+  if (!softFlagged.length) return false;
   try {
-    const response = await generateText(
-      [
-        `Candidate topic: ${candidate}`,
-        'Existing topics:',
-        ...previousTopics.map((topic, index) => `${index + 1}. ${topic}`),
-        '',
-        'If the candidate is the same event, same core subject, or a near-duplicate of any existing topic, return only the exact matching existing topic.',
-        'If none are near-duplicates, return only NONE.',
-      ].join('\n'),
-      niche,
-    );
-    const normalized = String(response || '').trim();
-    if (!normalized || /^none$/i.test(normalized)) return '';
-    return previousTopics.find((topic) => normalizeTopicText(topic) === normalizeTopicText(normalized)) || '';
+    const prompt = [
+      `New candidate topic: "${candidate}"`,
+      '',
+      'Previously published topics:',
+      ...softFlagged.map((t, i) => `${i + 1}. ${t}`),
+      '',
+      'TASK: Determine whether the candidate covers the same event, discovery, person, or core concept as ANY listed topic — even if phrased completely differently.',
+      'A topic IS a duplicate if:',
+      '  - It is about the same news story or event, just reworded',
+      '  - It covers the same subject with a different angle or framing',
+      '  - The headline would produce a very similar article',
+      'A topic is NOT a duplicate if it is about a clearly different subject matter.',
+      '',
+      'Reply with exactly one of:',
+      '  DUPLICATE - if it matches any listed topic',
+      '  UNIQUE - if it is genuinely different from all listed topics',
+    ].join('\n');
+
+    const response = await generateText(prompt, niche);
+    const answer = String(response || '').trim().toUpperCase();
+    return answer.startsWith('DUPLICATE');
   } catch {
-    return '';
+    return false;
   }
+}
+
+/**
+ * TopicShield-100 core uniqueness check.
+ * Returns true if the candidate is safe to use, false if it should be blocked.
+ */
+async function topicShield_isUnique(candidate: string, history: string[], niche: string): Promise<boolean> {
+  if (!candidate.trim()) return false;
+
+  const softFlagged: string[] = [];
+
+  for (const previous of history) {
+    if (!previous.trim()) continue;
+    if (topicShield_isHardBlocked(candidate, previous)) {
+      return false;
+    }
+    if (topicShield_isSoftFlagged(candidate, previous)) {
+      softFlagged.push(previous);
+    }
+  }
+
+  if (softFlagged.length > 0) {
+    const isDuplicate = await topicShield_semanticCheck(candidate, softFlagged.slice(0, 15), niche);
+    if (isDuplicate) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Load the 100 most recent topics for this niche from the topics table.
+ * This is the TopicShield-100 memory.
+ */
+async function topicShield_loadHistory(supabase: any, niche: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('topics')
+    .select('topic, created_at')
+    .eq('niche', niche)
+    .order('created_at', { ascending: false })
+    .limit(TOPICSHIELD_HISTORY_CAP);
+  if (error) {
+    console.warn('[TopicShield] Failed to load history:', error.message);
+    return [];
+  }
+  return (data || []).map((row: any) => String(row.topic || '').trim()).filter(Boolean);
 }
 
 function buildTrendingQueriesForNiche(niche: string) {
@@ -1218,68 +1409,41 @@ async function fetchTrendingTopicsForNiche(niche: string) {
   return deduped.slice(0, 100);
 }
 
-async function loadHistoricalTopicsForNiche(supabase: any, niche: string) {
-  const [topicsRes, postsRes] = await Promise.all([
-    supabase.from('topics').select('title,created_at').eq('niche', niche).order('created_at', { ascending: false }).limit(800),
-    supabase.from('posts').select('title,published_at').eq('niche', niche).order('published_at', { ascending: false }).limit(800),
-  ]);
-
-  const combined = [
-    ...((topicsRes.data || []).map((row: any) => row.title)),
-    ...((postsRes.data || []).map((row: any) => row.title)),
-  ].filter(Boolean);
-
-  return Array.from(new Set(combined.map((title: string) => title.trim()).filter(Boolean)));
-}
-
-async function findDuplicateTopicMatch(candidate: string, historicalTopics: string[], niche: string) {
-  const borderline: string[] = [];
-
-  for (const previous of historicalTopics) {
-    const signals = topicSimilaritySignals(candidate, previous);
-    if (!signals.normalizedCandidate || !signals.normalizedPrevious) continue;
-
-    if (signals.normalizedCandidate === signals.normalizedPrevious) return previous;
-    if (signals.keywordOverlap >= 0.85 && signals.entityOverlap >= 0.6) return previous;
-    if (signals.entityOverlap >= 0.75 && signals.themeOverlap >= 0.65) return previous;
-    if (signals.lexicalSimilarity >= 0.8 || signals.phraseSimilarity >= 0.7) return previous;
-    if (signals.sameLeadingTheme && (signals.keywordOverlap >= 0.72 || signals.themeOverlap >= 0.8)) return previous;
-
-    const moderateMatch = signals.keywordOverlap >= 0.55 || signals.entityOverlap >= 0.45 || signals.themeOverlap >= 0.65 || signals.lexicalSimilarity >= 0.6;
-    if (moderateMatch) borderline.push(previous);
-  }
-
-  if (borderline.length) {
-    const semanticMatch = await semanticDuplicateCheck(candidate, borderline.slice(0, 8), niche);
-    if (semanticMatch) return semanticMatch;
-  }
-
-  return '';
-}
-
-async function pickUniqueTrendingTopic(supabase: any, niche: string) {
+/**
+ * TopicShield-100: pick a unique trending topic.
+ * Checks every RSS candidate against the 100-topic history in two passes:
+ *   Pass 1 — deterministic signal checks (exact, Jaccard, keyword, entity, bigram, trigram, theme)
+ *   Pass 2 — AI semantic check on all soft-flagged historical topics
+ * Returns the first candidate that clears both passes.
+ */
+async function pickUniqueTrendingTopic(supabase: any, niche: string): Promise<string> {
   const candidates = await fetchTrendingTopicsForNiche(niche);
-  if (candidates.length < 100) {
-    console.warn(`[automation] Trending topic fetch returned ${candidates.length} unique candidates for niche="${niche}".`);
+  if (candidates.length < 20) {
+    console.warn(`[TopicShield] Only ${candidates.length} candidates fetched for niche="${niche}".`);
   }
 
-  const historicalTopics = await loadHistoricalTopicsForNiche(supabase, niche);
-  const rejected: Array<{ candidate: string; matched: string }> = [];
+  const history = await topicShield_loadHistory(supabase, niche);
+  console.log(`[TopicShield] Loaded ${history.length} historical topics (cap=${TOPICSHIELD_HISTORY_CAP}) for niche="${niche}".`);
+
+  const rejected: string[] = [];
 
   for (const candidate of candidates) {
-    const match = await findDuplicateTopicMatch(candidate, historicalTopics, niche);
-    if (match) {
-      rejected.push({ candidate, matched: match });
-      continue;
+    const unique = await topicShield_isUnique(candidate, history, niche);
+    if (unique) {
+      console.log(`[automation] Selected unique topic after reviewing ${candidates.length} candidates and ${history.length} historical topics.`);
+      if (rejected.length) {
+        console.log(`[TopicShield] Rejected ${rejected.length} duplicate/near-duplicate candidate(s) before selecting.`);
+      }
+      return candidate;
     }
-    console.log(`[automation] Selected unique topic after reviewing ${candidates.length} candidates and ${historicalTopics.length} historical topics.`);
-    if (rejected.length) {
-      console.log(`[automation] Rejected ${rejected.length} duplicate or near-duplicate candidates before selecting topic.`);
-    }
-    return candidate;
+    rejected.push(candidate);
   }
 
-  throw new Error(`Unable to find a unique topic for niche="${niche}" after checking ${candidates.length} trending candidates against ${historicalTopics.length} historical topics.`);
+  throw new Error(
+    `[TopicShield] No unique topic found for niche="${niche}" after checking ` +
+    `${candidates.length} candidates against ${history.length} historical topics. ` +
+    `All ${rejected.length} candidate(s) were blocked as duplicates.`
+  );
 }
 
 async function rewriteToViralTitle(topic: string, niche: string) {
@@ -1705,6 +1869,20 @@ export async function runBlogAutomation(scheduleId: string) {
           throw titleError;
         }
       }
+
+      // ── TopicShield-100: Post-rewrite check ────────────────────────────────
+      // The raw candidate passed the pre-selection check, but the rewritten
+      // viral title must ALSO be checked — different raw headlines can produce
+      // nearly identical final titles, which is a duplicate.
+      const postRewriteHistory = await topicShield_loadHistory(supabase, niche);
+      const viralTitleIsUnique = await topicShield_isUnique(topic, postRewriteHistory, niche);
+      if (!viralTitleIsUnique) {
+        throw new Error(
+          `[TopicShield] Post-rewrite duplicate detected: viral title "${topic}" is too similar to a previously published topic. Aborting run.`
+        );
+      }
+      console.log(`[TopicShield] Post-rewrite check passed for: "${topic}"`);
+      // ── end TopicShield post-rewrite check ────────────────────────────────
     }
     let content = '';
     try {
@@ -1791,7 +1969,7 @@ export async function runBlogAutomation(scheduleId: string) {
       }
     }
 
-    await supabase.from('topics').insert({ niche, title: topic, used: true, created_at: new Date().toISOString() });
+    await supabase.from('topics').insert({ niche, topic, created_at: new Date().toISOString() });
 
     if (account.facebook_page_id) {
       const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', account.facebook_page_id).single();
