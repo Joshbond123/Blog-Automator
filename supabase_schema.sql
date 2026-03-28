@@ -78,7 +78,12 @@ create table if not exists video_jobs (
   id uuid primary key default gen_random_uuid(),
   schedule_id uuid not null,
   status text not null,
+  topic text,
+  niche text,
   video_url text,
+  facebook_post_id text,
+  error_message text,
+  completed_at timestamptz,
   created_at timestamptz default now()
 );
 

@@ -1981,16 +1981,13 @@ export async function runBlogAutomation(scheduleId: string) {
 
           console.log(`✓ Facebook post published: https://www.facebook.com/${fbPage.page_id}/posts/${fbPostId}`);
 
+          const blogComment = await generateBloggerComment(topic, niche, bloggerPost.url);
           await axios.post(
             `https://graph.facebook.com/v19.0/${fbPostId}/comments`,
-            {
-              message: `Full article is live here: ${bloggerPost.url}
-
-If this helped you, share your thoughts and read the full post now 🚀`,
-              access_token: fbPage.access_token,
-            },
+            { message: blogComment, access_token: fbPage.access_token },
+            outboundConfig({ timeout: 30000 }),
           );
-          console.log(`✓ Facebook comment (article link) posted on ${fbPostId}`);
+          console.log(`✓ Facebook comment (AI-generated) posted on ${fbPostId}`);
         } catch (fbError: any) {
           const errBody = fbError?.response?.data ? JSON.stringify(fbError.response.data) : '';
           console.warn('[automation] Facebook cross-post warning:', fbError?.message || fbError, errBody);
@@ -2042,51 +2039,437 @@ If this helped you, share your thoughts and read the full post now 🚀`,
   }
 }
 
-export async function runVideoAutomation(scheduleId: string) {
-  const supabase = getSupabase();
-  const { data: schedule } = await supabase.from('schedules').select('*, facebook_pages(*)').eq('id', scheduleId).single();
-  if (!schedule) return;
+// ─────────────────────────────────────────────────────────────────────────────
+// VIDEO PIPELINE HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const fbPage = schedule.facebook_pages;
-  const settings = await getSettings();
+async function generateBloggerComment(topic: string, niche: string, blogUrl: string): Promise<string> {
+  try {
+    const raw = await generateText(
+      `You are a social media manager posting a comment on a Facebook post about "${topic}" in the ${niche} niche.
 
-  const niche = 'Viral Entertainment';
-  const topic = await generateText(`Generate a viral video topic for the ${niche} niche.`, niche);
-  const script = await generateText(`Write a 30-second video script for the topic: "${topic}".`, niche);
-  const voiceBuffer = await generateVoiceover(script);
-  const githubRepo = String(settings.github_repo || '').trim();
-  const githubPat = decryptSecret(settings.github_pat || '');
-  const voicePath = `automation/voiceovers/voice-${Date.now()}.mp3`;
-  const voiceUrl = (githubRepo && githubPat)
-    ? await uploadBufferToGithub(githubRepo, githubPat, voiceBuffer, voicePath, `Upload voiceover: ${topic}`)
-    : '';
+Write ONE short, highly engaging comment that:
+- Mentions something curious or surprising about the topic (1 sentence)
+- Teases what readers will find in the full article (1 sentence)
+- Ends with a direct call-to-action to click the link
+- Includes the article URL: ${blogUrl}
+- Sounds human, not robotic
+- Maximum 3 sentences total, no hashtags
 
-  if (settings.github_pat) {
-    await axios.post(
-      'https://api.github.com/repos/YOUR_USER/YOUR_REMOTION_REPO/dispatches',
-      {
-        event_type: 'render_video',
-        client_payload: {
-          topic,
-          script,
-          voiceUrl,
-          imgbbApiKey: decryptSecret(settings.imgbb_api_key || ''),
-          fbPageId: fbPage.page_id,
-          fbAccessToken: fbPage.access_token
-        }
-      },
-      {
-        headers: {
-          Authorization: `token ${settings.github_pat}`,
-          Accept: 'application/vnd.github.v3+json'
-        }
-      }
+Return ONLY the comment text.`,
+      niche,
     );
+    return String(raw || '').trim().slice(0, 500) || `Read the full article: ${blogUrl}`;
+  } catch {
+    return `Fascinating topic! Read the full breakdown here 👉 ${blogUrl}`;
+  }
+}
+
+interface WordTimestamp {
+  word: string;
+  start: number;
+  end: number;
+}
+
+function convertCharToWordTimestamps(alignment: any): WordTimestamp[] {
+  const characters: string[] = alignment?.characters || [];
+  const starts: number[] = alignment?.character_start_times_seconds || [];
+  const ends: number[] = alignment?.character_end_times_seconds || [];
+
+  const words: WordTimestamp[] = [];
+  let currentWord = '';
+  let wordStart: number | null = null;
+  let wordEnd = 0;
+
+  for (let i = 0; i < characters.length; i++) {
+    const ch = characters[i];
+    const s = starts[i] ?? 0;
+    const e = ends[i] ?? s + 0.05;
+
+    if (ch === ' ' || ch === '\n' || ch === '\r') {
+      if (currentWord.length > 0) {
+        words.push({ word: currentWord, start: wordStart!, end: wordEnd });
+        currentWord = '';
+        wordStart = null;
+      }
+    } else {
+      if (wordStart === null) wordStart = s;
+      wordEnd = e;
+      currentWord += ch;
+    }
+  }
+  if (currentWord.length > 0 && wordStart !== null) {
+    words.push({ word: currentWord, start: wordStart, end: wordEnd });
+  }
+  return words;
+}
+
+interface VideoScript {
+  voiceover: string;
+  scenes: Array<{ imagePrompt: string }>;
+  hashtags: string[];
+}
+
+async function generateVideoScript(topic: string, niche: string): Promise<VideoScript> {
+  const raw = await generateText(
+    `You are a viral short-form video content creator. Create a complete video script for this topic: "${topic}"
+Niche: ${niche}
+
+REQUIREMENTS:
+- voiceover: 80-110 words of narration. Hook in first 5 words. Specific facts. Conversational energy. End with strong CTA ("Follow for more", "Share this", "Comment below").
+- scenes: exactly 5 scene descriptions. Each must be a DETAILED image generation prompt. Cinematic, realistic, NO TEXT, NO WORDS, NO SIGNS, NO LETTERS in the image.
+- hashtags: exactly 5 viral hashtags for this topic.
+
+Return ONLY valid JSON, nothing else:
+{
+  "voiceover": "complete narration text here",
+  "scenes": [
+    {"imagePrompt": "detailed scene 1 description"},
+    {"imagePrompt": "detailed scene 2 description"},
+    {"imagePrompt": "detailed scene 3 description"},
+    {"imagePrompt": "detailed scene 4 description"},
+    {"imagePrompt": "detailed scene 5 description"}
+  ],
+  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"]
+}`,
+    niche,
+  );
+
+  let parsed: any;
+  try {
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
+  } catch {
+    throw new Error(`Video script JSON parse failed. Raw: ${raw.slice(0, 200)}`);
   }
 
-  await supabase.from('video_jobs').insert({
-    schedule_id: scheduleId,
-    status: 'rendering',
-    created_at: new Date().toISOString()
-  });
+  if (!parsed?.voiceover || !Array.isArray(parsed?.scenes) || parsed.scenes.length < 3) {
+    throw new Error(`Video script missing required fields. Got: ${JSON.stringify(Object.keys(parsed || {}))}`);
+  }
+
+  return {
+    voiceover: String(parsed.voiceover).trim(),
+    scenes: (parsed.scenes as any[]).slice(0, 6).map((s: any) => ({ imagePrompt: String(s?.imagePrompt || s?.prompt || '').trim() })),
+    hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags.slice(0, 5) : [],
+  };
+}
+
+async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: Buffer; wordTimestamps: WordTimestamp[] }> {
+  const selected = await pickRotatingKey('elevenlabs_keys', 'elevenlabs_rotation_index');
+
+  try {
+    const res = await axios.post(
+      `https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/with-timestamps`,
+      { text, model_id: 'eleven_monolingual_v1' },
+      outboundConfig({ headers: { 'xi-api-key': selected.key, 'Content-Type': 'application/json' }, timeout: 120000 }),
+    );
+
+    await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, true);
+
+    const audioBase64 = String(res.data?.audio_base64 || '').replace(/\s/g, '');
+    if (!audioBase64) throw new Error('ElevenLabs with-timestamps returned empty audio_base64');
+
+    const buffer = Buffer.from(audioBase64, 'base64');
+    const wordTimestamps = convertCharToWordTimestamps(res.data?.alignment || {});
+    console.log(`[video] Voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps`);
+    return { buffer, wordTimestamps };
+  } catch (err) {
+    await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, false);
+    throw err;
+  }
+}
+
+async function dispatchVideoRenderWorkflow(
+  repo: string,
+  token: string,
+  voiceoverPath: string,
+  scenePaths: string[],
+  wordTimestamps: WordTimestamp[],
+  title: string,
+  correlationId: string,
+) {
+  const { owner, name } = parseGithubRepo(repo);
+  await axios.post(
+    `https://api.github.com/repos/${owner}/${name}/dispatches`,
+    {
+      event_type: 'render_video',
+      client_payload: {
+        voiceoverPath,
+        scenePaths: JSON.stringify(scenePaths),
+        wordTimestamps: JSON.stringify(wordTimestamps),
+        title,
+        correlationId,
+      },
+    },
+    outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
+  );
+  console.log(`[video] Dispatched render_video workflow: ${correlationId}`);
+}
+
+async function waitForVideoRenderArtifact(repo: string, token: string, correlationId: string): Promise<{ videoBuffer: Buffer; result: any }> {
+  const { owner, name } = parseGithubRepo(repo);
+  const artifactName = `video-result-${correlationId}`;
+  const expectedRunName = `Video Renderer - ${correlationId}`;
+  const startedAt = Date.now();
+  let runId = '';
+
+  for (let i = 0; i < 60; i++) {
+    await sleep(15000);
+
+    const runsRes = await axios.get(
+      `https://api.github.com/repos/${owner}/${name}/actions/runs?event=repository_dispatch&per_page=15`,
+      outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
+    );
+    const runs = Array.isArray(runsRes.data?.workflow_runs) ? runsRes.data.workflow_runs : [];
+
+    if (!runId) {
+      const candidate = runs.find((r: any) => {
+        const created = Date.parse(r?.created_at || '');
+        return created >= startedAt - 30000 && String(r?.display_title || r?.name || '').includes(correlationId);
+      });
+      if (candidate) {
+        runId = String(candidate.id);
+        console.log(`[video] Found workflow run: ${runId} (${candidate.status})`);
+      }
+    }
+
+    if (runId) {
+      const run = runs.find((r: any) => String(r.id) === runId);
+      if (!run) continue;
+      if (run.status === 'completed') {
+        if (run.conclusion === 'failure') throw new Error(`Video render workflow failed (run ${runId}). Check GitHub Actions for details.`);
+        if (run.conclusion !== 'success') throw new Error(`Video render workflow ended with conclusion="${run.conclusion}"`);
+        console.log(`[video] Workflow completed successfully: ${runId}`);
+        break;
+      }
+      console.log(`[video] Workflow ${runId} still running (${run.status})... (${Math.round((Date.now() - startedAt) / 1000)}s elapsed)`);
+    }
+
+    if (Date.now() - startedAt > 25 * 60 * 1000) {
+      throw new Error(`Video render workflow timed out after 25 minutes. correlationId=${correlationId}`);
+    }
+  }
+
+  const artifactsRes = await axios.get(
+    `https://api.github.com/repos/${owner}/${name}/actions/runs/${runId}/artifacts`,
+    outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
+  );
+  const artifacts = Array.isArray(artifactsRes.data?.artifacts) ? artifactsRes.data.artifacts : [];
+  const artifact = artifacts.find((a: any) => a.name === artifactName);
+  if (!artifact) throw new Error(`Artifact "${artifactName}" not found for run ${runId}`);
+
+  const zipRes = await axios.get(
+    `https://api.github.com/repos/${owner}/${name}/actions/artifacts/${artifact.id}/zip`,
+    outboundConfig({ headers: githubHeaders(token), responseType: 'arraybuffer', timeout: 120000 }),
+  );
+  const AdmZip = (await import('adm-zip')).default;
+  const zip = new AdmZip(Buffer.from(zipRes.data));
+
+  const resultEntry = zip.getEntry('result.json');
+  if (!resultEntry) throw new Error('result.json not found in video artifact zip');
+  const resultPayload = JSON.parse(resultEntry.getData().toString('utf8'));
+
+  const videoEntry = zip.getEntry('output.mp4');
+  if (!videoEntry) throw new Error('output.mp4 not found in video artifact zip');
+  const videoBuffer = videoEntry.getData();
+  if (videoBuffer.length < 100 * 1024) throw new Error(`Video in artifact is too small: ${videoBuffer.length} bytes`);
+
+  console.log(`[video] Artifact downloaded: ${(videoBuffer.length / 1024 / 1024).toFixed(2)}MB video`);
+  return { videoBuffer, result: resultPayload };
+}
+
+async function publishVideoToFacebook(pageId: string, accessToken: string, videoBuffer: Buffer, description: string): Promise<string> {
+  const FormData = (await import('form-data')).default;
+  const formData = new FormData();
+  formData.append('source', videoBuffer, { filename: 'video.mp4', contentType: 'video/mp4' });
+  formData.append('description', description);
+  formData.append('access_token', accessToken);
+
+  const res = await axios.post(
+    `https://graph-video.facebook.com/v19.0/${pageId}/videos`,
+    formData,
+    outboundConfig({
+      headers: formData.getHeaders(),
+      timeout: 180000,
+      maxContentLength: 100 * 1024 * 1024,
+      maxBodyLength: 100 * 1024 * 1024,
+    }),
+  );
+
+  const videoId = String(res.data?.id || '').trim();
+  if (!videoId) throw new Error(`Facebook video upload returned no ID: ${JSON.stringify(res.data)}`);
+  console.log(`[video] Facebook video posted: ${videoId}`);
+  return videoId;
+}
+
+async function generateVideoEngagementComment(topic: string, niche: string, blogUrl?: string): Promise<string> {
+  try {
+    const blogLine = blogUrl ? `\n- Optionally reference this blog post for further reading: ${blogUrl}` : '';
+    const raw = await generateText(
+      `You are a social media expert. Write ONE high-engagement comment for a Facebook video about "${topic}" in the ${niche} niche.
+
+The comment must:
+- Ask a provocative question that sparks replies
+- Be curious, enthusiastic, short (2-3 sentences)
+- Drive likes, shares, and comment replies
+- Feel human and conversational, NOT corporate${blogLine}
+- NO hashtags in the comment
+
+Return ONLY the comment text.`,
+      niche,
+    );
+    return String(raw || '').trim().slice(0, 500);
+  } catch {
+    return `What do you think about this? Drop your thoughts below and share with a friend who needs to see this! 👇`;
+  }
+}
+
+export async function runVideoAutomation(scheduleId: string) {
+  const supabase = getSupabase();
+  const { data: schedule } = await supabase.from('schedules').select('*').eq('id', scheduleId).single();
+  if (!schedule) {
+    console.error(`[video] Schedule ${scheduleId} not found`);
+    return;
+  }
+
+  const fbPageId = String(schedule.target_id || '').trim();
+  const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', fbPageId).single();
+  if (!fbPage) {
+    await supabase.from('schedules').update({ metadata: buildScheduleMetadataStatus(schedule.metadata, 'failed: facebook page not found') }).eq('id', scheduleId);
+    console.error(`[video] Facebook page ${fbPageId} not found`);
+    return;
+  }
+
+  const niche = String(schedule.metadata?.niche || fbPage.name || 'Viral Facts').trim();
+  const settings = await getSettings();
+  const githubRepo = String(settings.github_repo || '').trim();
+  const githubPat = decryptSecret(settings.github_pat || '');
+
+  if (!githubRepo || !githubPat) {
+    await supabase.from('schedules').update({ metadata: buildScheduleMetadataStatus(schedule.metadata, 'failed: GitHub repo or PAT not configured') }).eq('id', scheduleId);
+    return;
+  }
+
+  let jobId = '';
+  let topic = '';
+
+  try {
+    await supabase.from('schedules').update({ metadata: buildScheduleMetadataStatus(schedule.metadata, 'running') }).eq('id', scheduleId);
+
+    // ── 1. Insert a pending job row
+    const { data: jobRow } = await supabase.from('video_jobs').insert({
+      schedule_id: scheduleId,
+      status: 'running',
+      created_at: new Date().toISOString(),
+    }).select().single();
+    jobId = jobRow?.id || '';
+
+    // ── 2. Fetch 100 trending topics from the web + TopicShield selection
+    console.log(`[video] Fetching trending topics and selecting unique topic for niche="${niche}"...`);
+    const rawTopic = await pickUniqueTrendingTopic(supabase, niche);
+    if (!rawTopic) throw new Error(`TopicShield could not find a unique topic for niche="${niche}"`);
+
+    // ── 4. Rewrite topic to viral headline
+    topic = await rewriteToViralTitle(rawTopic, niche);
+    console.log(`[video] Topic selected & rewritten: "${topic}"`);
+
+    // ── 5. Generate structured video script (voiceover + scenes + hashtags)
+    console.log('[video] Generating video script...');
+    const videoScript = await generateVideoScript(topic, niche);
+    const { voiceover, scenes, hashtags } = videoScript;
+    console.log(`[video] Script: ${voiceover.split(' ').length} words, ${scenes.length} scenes`);
+
+    // ── 6. Generate voiceover with word-level timestamps
+    console.log('[video] Generating voiceover with timestamps...');
+    const { buffer: voiceBuffer, wordTimestamps } = await generateVoiceoverWithTimestamps(voiceover);
+    if (voiceBuffer.length < 5000) throw new Error('Voiceover audio buffer too small');
+
+    // ── 7. Upload voiceover to GitHub
+    const ts = Date.now();
+    const voicePath = `automation/voiceovers/voice-${ts}.mp3`;
+    await uploadBufferToGithub(githubRepo, githubPat, voiceBuffer, voicePath, `Video voiceover: ${topic}`);
+    console.log(`[video] Voiceover uploaded to GitHub: ${voicePath}`);
+
+    // ── 8. Generate scene images with Cloudflare Workers AI
+    console.log(`[video] Generating ${scenes.length} scene images...`);
+    const scenePaths: string[] = [];
+    for (let i = 0; i < scenes.length; i++) {
+      const scenePrompt = `${scenes[i].imagePrompt}. Ultra-realistic, cinematic photography, no text, no words, no letters, no signs, no watermarks, high quality.`;
+      const sceneBuffer = await generateImage(scenePrompt);
+      const scenePath = `automation/scenes/scene-${ts}-${i}.jpg`;
+      await uploadBufferToGithub(githubRepo, githubPat, sceneBuffer, scenePath, `Video scene ${i + 1}: ${topic}`);
+      scenePaths.push(scenePath);
+      console.log(`[video] Scene ${i + 1}/${scenes.length} generated & uploaded`);
+    }
+
+    // ── 9. Dispatch GitHub Actions render_video workflow
+    const correlationId = `video-${ts}-${Math.random().toString(36).slice(2, 8)}`;
+    await dispatchVideoRenderWorkflow(githubRepo, githubPat, voicePath, scenePaths, wordTimestamps, topic, correlationId);
+
+    // ── 10. Poll until video render completes and download artifact
+    console.log(`[video] Waiting for render workflow to complete (correlationId=${correlationId})...`);
+    const { videoBuffer, result: renderResult } = await waitForVideoRenderArtifact(githubRepo, githubPat, correlationId);
+    console.log(`[video] Render complete: ${renderResult.videoDuration?.toFixed(1)}s video, ${renderResult.videoSizeMB}MB`);
+
+    // ── 11. Build Facebook post description
+    const hashtagStr = hashtags.join(' ');
+    const fbDescription = `${topic}\n\n${hashtagStr}`;
+
+    // ── 12. Post video to Facebook
+    console.log('[video] Uploading video to Facebook...');
+    const videoId = await publishVideoToFacebook(fbPage.page_id, fbPage.access_token, videoBuffer, fbDescription);
+    const fbVideoUrl = `https://www.facebook.com/${fbPage.page_id}/videos/${videoId}`;
+    console.log(`✓ Facebook video published: ${fbVideoUrl}`);
+
+    // ── 13. Look up linked blogger account for blog URL reference
+    let blogUrl: string | undefined;
+    try {
+      const { data: blogAccount } = await supabase
+        .from('blogger_accounts')
+        .select('url')
+        .eq('facebook_page_id', fbPage.id)
+        .single();
+      blogUrl = blogAccount?.url;
+    } catch { /* no linked blog, that's ok */ }
+
+    // ── 14. Post AI-generated engagement comment on the video
+    await sleep(8000);
+    try {
+      const engComment = await generateVideoEngagementComment(topic, niche, blogUrl);
+      await axios.post(
+        `https://graph.facebook.com/v19.0/${videoId}/comments`,
+        { message: engComment, access_token: fbPage.access_token },
+        outboundConfig({ timeout: 30000 }),
+      );
+      console.log(`✓ Engagement comment posted on video ${videoId}`);
+    } catch (commentErr: any) {
+      console.warn('[video] Comment post warning:', commentErr?.message);
+    }
+
+    // ── 15. Save topic to TopicShield history
+    await supabase.from('topics').insert({ niche, topic, created_at: new Date().toISOString() });
+
+    // ── 16. Log to video_jobs
+    if (jobId) {
+      await supabase.from('video_jobs').update({
+        status: 'published',
+        video_url: fbVideoUrl,
+      }).eq('id', jobId);
+    }
+
+    // ── 17. Update schedule metadata
+    const statusMsg = `success: published video "${topic}" → ${fbVideoUrl}`;
+    await supabase.from('schedules').update({ metadata: buildScheduleMetadataStatus(schedule.metadata, statusMsg) }).eq('id', scheduleId);
+
+    console.log(`\n✓ Video automation complete for schedule ${scheduleId}`);
+    console.log(`  Topic: ${topic}`);
+    console.log(`  Facebook: ${fbVideoUrl}`);
+  } catch (error: any) {
+    const errMsg = String(error?.message || error || 'unknown error');
+    console.error(`[video] FAILED for schedule ${scheduleId}:`, errMsg);
+    if (jobId) {
+      await supabase.from('video_jobs').update({ status: 'failed' }).eq('id', jobId);
+    }
+    await supabase.from('schedules').update({ metadata: buildScheduleMetadataStatus(schedule.metadata, `failed: ${errMsg.slice(0, 200)}`) }).eq('id', scheduleId);
+  }
 }

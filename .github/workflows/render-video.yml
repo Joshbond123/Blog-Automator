@@ -1,0 +1,46 @@
+name: Video Renderer
+run-name: Video Renderer - ${{ github.event.client_payload.correlationId }}
+
+on:
+  repository_dispatch:
+    types: [render_video]
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install ffmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-liberation fonts-open-sans
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
+
+      - name: Render video
+        env:
+          VOICEOVER_GITHUB_PATH: ${{ github.event.client_payload.voiceoverPath }}
+          SCENE_GITHUB_PATHS: ${{ github.event.client_payload.scenePaths }}
+          WORD_TIMESTAMPS_JSON: ${{ github.event.client_payload.wordTimestamps }}
+          TITLE_TEXT: ${{ github.event.client_payload.title }}
+          CORRELATION_ID: ${{ github.event.client_payload.correlationId }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node scripts/render-video.mjs
+
+      - name: Upload video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-result-${{ github.event.client_payload.correlationId }}
+          path: |
+            result.json
+            output.mp4
+          if-no-files-found: error
+          retention-days: 3
