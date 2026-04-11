@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import { statSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { resolve } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
@@ -16,8 +17,16 @@ async function downloadFromGitHub(repo, token, filePath, outputPath) {
   if (!res.ok) throw new Error(`Failed to fetch "${filePath}" from GitHub (${res.status}): ${await res.text()}`);
   const payload = await res.json();
   const b64 = String(payload?.content || '').replace(/\n/g, '');
-  if (!b64) throw new Error(`GitHub returned empty content for "${filePath}"`);
-  await fs.writeFile(outputPath, Buffer.from(b64, 'base64'));
+  if (b64) {
+    await fs.writeFile(outputPath, Buffer.from(b64, 'base64'));
+  } else if (payload?.download_url) {
+    const dlRes = await fetch(payload.download_url);
+    if (!dlRes.ok) throw new Error(`Failed to download "${filePath}" via download_url (${dlRes.status})`);
+    const buf = Buffer.from(await dlRes.arrayBuffer());
+    await fs.writeFile(outputPath, buf);
+  } else {
+    throw new Error(`GitHub returned empty content and no download_url for "${filePath}"`);
+  }
   const size = statSync(outputPath).size;
   if (size < 1000) throw new Error(`Downloaded file "${outputPath}" is suspiciously small (${size} bytes)`);
   console.log(`[download] ${filePath} → ${outputPath} (${(size / 1024).toFixed(1)} KB)`);
@@ -173,14 +182,15 @@ async function main() {
     sceneVideos.push(videoFile);
   }
 
-  const concatList = sceneVideos.map((f) => `file '${f.replace(/'/g, "'\\''")}'`).join('\n');
+  const concatList = sceneVideos.map((f) => `file '${resolve(f).replace(/'/g, "'\\''")}'`).join('\n');
   await fs.writeFile('render_workspace/concat_list.txt', concatList, 'utf8');
 
   console.log('[render-video] Concatenating scene videos...');
   await execFileAsync('ffmpeg', [
     '-y', '-f', 'concat', '-safe', '0',
     '-i', 'render_workspace/concat_list.txt',
-    '-c', 'copy',
+    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    '-pix_fmt', 'yuv420p', '-r', '24',
     'render_workspace/video_scenes.mp4',
   ], { maxBuffer: 200 * 1024 * 1024 });
 

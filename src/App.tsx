@@ -774,7 +774,7 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
   const [showAdd, setShowAdd] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
 
-  const [newSchedule, setNewSchedule] = useState({ target_id: '', schedule_time: '12:00', niche: '' });
+  const [newSchedule, setNewSchedule] = useState({ target_id: '', schedule_time: '12:00' });
   const [addError, setAddError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -811,12 +811,12 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
           schedule_time: newSchedule.schedule_time,
           timezone: 'UTC',
           is_enabled: true,
-          metadata: type === 'video' ? { niche: newSchedule.niche || 'Viral Facts' } : {}
+          metadata: {}
         })
       });
       if (res.ok) {
         setShowAdd(false);
-        setNewSchedule({ target_id: '', schedule_time: '12:00', niche: '' });
+        setNewSchedule({ target_id: '', schedule_time: '12:00' });
         fetchData();
       } else {
         const err = await res.json().catch(() => ({ error: 'Failed to create schedule' }));
@@ -917,7 +917,7 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                       </span>
                       <span className="w-1 h-1 bg-zinc-700 rounded-full" />
                       <span className="text-indigo-400 text-xs font-bold uppercase tracking-wider">
-                        {type === 'blog' ? (target as BloggerAccount)?.niche : (s.metadata?.niche || 'Video Content')}
+                        {type === 'blog' ? (target as BloggerAccount)?.niche : 'Video Content'}
                       </span>
                       <span className={cn(
                         "text-xs font-semibold px-2 py-0.5 rounded-full",
@@ -1009,19 +1009,6 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                     <p className="text-xs text-amber-400 mt-1">No Blogger accounts configured. Add one first.</p>
                   )}
                 </div>
-                {type === 'video' && (
-                  <div className="space-y-2">
-                    <label className="text-sm font-medium text-zinc-400">Content Niche</label>
-                    <input
-                      type="text"
-                      placeholder="e.g. Viral Facts, Science, Technology..."
-                      value={newSchedule.niche}
-                      onChange={(e) => setNewSchedule({ ...newSchedule, niche: e.target.value })}
-                      className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl px-4 py-3 text-white focus:outline-none focus:border-indigo-500 transition-colors placeholder:text-zinc-600"
-                    />
-                    <p className="text-xs text-zinc-500">Topics will be fetched from the web based on this niche.</p>
-                  </div>
-                )}
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-zinc-400">Daily Posting Time (UTC)</label>
                   <input 

@@ -502,6 +502,17 @@ async function startServer() {
     }
   });
 
+  app.patch("/api/facebook-pages/:id", async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const { data, error } = await supabase.from("facebook_pages").update(req.body).eq("id", req.params.id).select().single();
+      if (error) return res.status(500).json({ error: error.message });
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.delete("/api/facebook-pages/:id", async (req, res) => {
     try {
       const supabase = getSupabase();

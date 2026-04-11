@@ -941,8 +941,8 @@ async function generateVoiceover(text: string) {
 
   try {
     const res = await axios.post(
-      'https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM',
-      { text, model_id: 'eleven_monolingual_v1' },
+      'https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL',
+      { text, model_id: 'eleven_flash_v2_5' },
       { headers: { 'xi-api-key': selected.key }, responseType: 'arraybuffer' }
     );
 
@@ -2154,13 +2154,30 @@ Return ONLY valid JSON, nothing else:
   };
 }
 
+function estimateWordTimestamps(text: string, audioDurationSeconds?: number): WordTimestamp[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  const wordsPerSecond = 2.5;
+  const totalDuration = audioDurationSeconds ?? words.length / wordsPerSecond;
+  const avgDur = totalDuration / Math.max(words.length, 1);
+  const timestamps: WordTimestamp[] = [];
+  let cursor = 0;
+  for (const word of words) {
+    const start = cursor;
+    const end = cursor + avgDur;
+    timestamps.push({ word, start, end });
+    cursor = end;
+  }
+  return timestamps;
+}
+
 async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: Buffer; wordTimestamps: WordTimestamp[] }> {
   const selected = await pickRotatingKey('elevenlabs_keys', 'elevenlabs_rotation_index');
 
+  // Try the premium /with-timestamps endpoint first; fall back to standard TTS on 401/403
   try {
     const res = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM/with-timestamps`,
-      { text, model_id: 'eleven_monolingual_v1' },
+      `https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL/with-timestamps`,
+      { text, model_id: 'eleven_flash_v2_5' },
       outboundConfig({ headers: { 'xi-api-key': selected.key, 'Content-Type': 'application/json' }, timeout: 120000 }),
     );
 
@@ -2171,9 +2188,31 @@ async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: 
 
     const buffer = Buffer.from(audioBase64, 'base64');
     const wordTimestamps = convertCharToWordTimestamps(res.data?.alignment || {});
-    console.log(`[video] Voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps`);
+    console.log(`[video] Voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (aligned)`);
     return { buffer, wordTimestamps };
-  } catch (err) {
+  } catch (err: any) {
+    const status = Number(err?.response?.status || 0);
+    if (status === 401 || status === 403) {
+      // Plan does not support /with-timestamps — use standard TTS + estimated timestamps
+      console.warn(`[video] ElevenLabs /with-timestamps not available (${status}). Falling back to standard TTS with estimated timestamps.`);
+      try {
+        const res2 = await axios.post(
+          'https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL',
+          { text, model_id: 'eleven_flash_v2_5' },
+          outboundConfig({ headers: { 'xi-api-key': selected.key }, responseType: 'arraybuffer', timeout: 120000 }),
+        );
+        await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, true);
+        const buffer = Buffer.from(res2.data);
+        // Estimate ~128kbps MP3 duration from buffer size
+        const estimatedDurationSeconds = (buffer.length * 8) / (128 * 1000);
+        const wordTimestamps = estimateWordTimestamps(text, estimatedDurationSeconds);
+        console.log(`[video] Voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (estimated)`);
+        return { buffer, wordTimestamps };
+      } catch (fallbackErr) {
+        await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, false);
+        throw fallbackErr;
+      }
+    }
     await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, false);
     throw err;
   }
@@ -2340,7 +2379,20 @@ export async function runVideoAutomation(scheduleId: string) {
     return;
   }
 
-  const niche = String(schedule.metadata?.niche || fbPage.name || 'Viral Facts').trim();
+  // Auto-determine niche from the Blogger account linked to this Facebook page
+  const { data: linkedBlogger } = await supabase
+    .from('blogger_accounts')
+    .select('niche, name')
+    .eq('facebook_page_id', fbPageId)
+    .limit(1)
+    .single();
+
+  const niche = String(linkedBlogger?.niche || '').trim() || 'Viral Facts';
+  console.log(`[video] Niche resolved from linked Blogger account: "${niche}" (account: "${linkedBlogger?.name || 'none'}")`);
+
+  if (!linkedBlogger) {
+    console.warn(`[video] No Blogger account linked to Facebook page "${fbPage.name}" (id=${fbPageId}). Using fallback niche: "${niche}". Link a Blogger account to this Facebook page to set the niche automatically.`);
+  }
   const settings = await getSettings();
   const githubRepo = String(settings.github_repo || '').trim();
   const githubPat = decryptSecret(settings.github_pat || '');
@@ -2395,7 +2447,8 @@ export async function runVideoAutomation(scheduleId: string) {
     const scenePaths: string[] = [];
     for (let i = 0; i < scenes.length; i++) {
       const scenePrompt = `${scenes[i].imagePrompt}. Ultra-realistic, cinematic photography, no text, no words, no letters, no signs, no watermarks, high quality.`;
-      const sceneBuffer = await generateImage(scenePrompt);
+      const rawBuffer = await generateImage(scenePrompt);
+      const sceneBuffer = await compressForGithub(rawBuffer);
       const scenePath = `automation/scenes/scene-${ts}-${i}.jpg`;
       await uploadBufferToGithub(githubRepo, githubPat, sceneBuffer, scenePath, `Video scene ${i + 1}: ${topic}`);
       scenePaths.push(scenePath);
