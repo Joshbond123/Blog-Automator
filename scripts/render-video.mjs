@@ -6,22 +6,27 @@ import { resolve } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
-// ── Viral background music pool (royalty-free, Mixkit Free License) ──────────
+// ── Royalty-free music pool (SoundHelix — no attribution required) ────────────
+// SoundHelix.com provides algorithmically-composed instrumental tracks, freely usable.
 const VIRAL_MUSIC_URLS = [
-  'https://assets.mixkit.co/music/preview/mixkit-tech-house-vibes-130.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-driving-ambition-32.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-hip-hop-02-738.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-deep-urban-623.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-hazy-after-hours-132.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-serene-view-443.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-life-is-a-dream-837.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-chill-vibes-113.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-inspirational-life-132.mp3',
-  'https://assets.mixkit.co/music/preview/mixkit-a-very-happy-christmas-897.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-6.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-7.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-9.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-10.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-11.mp3',
+  'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-12.mp3',
 ];
 
-function pickRandomMusicUrl() {
-  return VIRAL_MUSIC_URLS[Math.floor(Math.random() * VIRAL_MUSIC_URLS.length)];
+function pickRandomMusicUrls() {
+  // Return a shuffled copy so we can try in random order
+  const shuffled = [...VIRAL_MUSIC_URLS].sort(() => Math.random() - 0.5);
+  return shuffled;
 }
 
 // ── GitHub asset download ─────────────────────────────────────────────────────
@@ -51,41 +56,92 @@ async function downloadFromGitHub(repo, token, filePath, outputPath) {
   console.log(`[download] ${filePath} → ${outputPath} (${(size / 1024).toFixed(1)} KB)`);
 }
 
-// ── Background music download (with graceful fallback) ───────────────────────
+// ── Background music: download with retry, then synthesize as final fallback ──
 async function downloadMusicTrack(outputPath) {
-  const musicUrl = pickRandomMusicUrl();
-  console.log(`[music] Selected track: ${musicUrl}`);
+  const urls = pickRandomMusicUrls();
 
+  for (const musicUrl of urls) {
+    console.log(`[music] Trying: ${musicUrl}`);
+    try {
+      const res = await fetch(musicUrl, { signal: AbortSignal.timeout(25000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length < 50 * 1024) throw new Error(`Track too small (${buf.length} bytes)`);
+      await fs.writeFile(outputPath, buf);
+      console.log(`[music] ✓ Downloaded ${(buf.length / 1024).toFixed(0)}KB from ${musicUrl}`);
+      return true;
+    } catch (err) {
+      console.warn(`[music] Failed (${err?.message}), trying next...`);
+    }
+  }
+
+  // All URLs failed — synthesize an ambient lo-fi beat with ffmpeg
+  console.log('[music] All URLs failed. Synthesizing background music with ffmpeg...');
   try {
-    const res = await fetch(musicUrl, { signal: AbortSignal.timeout(30000) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 20 * 1024) throw new Error(`Music track too small (${buf.length} bytes)`);
-    await fs.writeFile(outputPath, buf);
-    const size = statSync(outputPath).size;
-    console.log(`[music] Downloaded ${(size / 1024).toFixed(0)}KB`);
+    await synthesizeBackgroundMusic(outputPath, 120);
     return true;
-  } catch (err) {
-    console.warn(`[music] Download failed (${err?.message}). Video will render without background music.`);
+  } catch (synthErr) {
+    console.warn(`[music] Synthesis also failed (${synthErr?.message}). Video will be voice-only.`);
     return false;
   }
 }
 
+// Generate a synthesized lo-fi ambient background track (no downloads needed)
+async function synthesizeBackgroundMusic(outputPath, durationSeconds) {
+  const dur = Math.ceil(durationSeconds) + 2;
+  // Bass kick at ~2 beats/sec + warm chord pad + subtle hi-hat rhythm
+  const expr = [
+    `0.35*sin(2*PI*55*t)*exp(-mod(t,0.5)*9)`,      // punchy bass kick every 0.5s
+    `0.20*sin(2*PI*110*t)*exp(-mod(t,0.5)*9)`,      // bass harmonic
+    `0.08*sin(2*PI*330*t)*exp(-mod(t,1.0)*5)`,      // mid chord tone every 1s
+    `0.06*sin(2*PI*415*t)*exp(-mod(t,1.0)*5)`,      // chord second note
+    `0.04*sin(2*PI*495*t)*exp(-mod(t,2.0)*4)`,      // chord third note every 2s
+    `0.05*sin(2*PI*880*t)*exp(-mod(t,0.25)*30)`,    // hi-hat clicks every 0.25s
+  ].join('+');
+  await execFileAsync('ffmpeg', [
+    '-y',
+    '-f', 'lavfi',
+    '-i', `aevalsrc=${expr}:s=44100:d=${dur}`,
+    '-c:a', 'aac', '-b:a', '96k',
+    outputPath,
+  ], { maxBuffer: 50 * 1024 * 1024 });
+  console.log('[music] ✓ Synthesized background track');
+}
+
 // ── Mix voiceover + background music ─────────────────────────────────────────
 async function mixAudioWithMusic(voiceFile, musicFile, outputFile) {
-  // Stream-loop music so it always covers the full voiceover length.
-  // Volume: voiceover at 100%, music at 15% (-16.5 dB) for balanced mix.
+  // amix with stream_loop -1 in filter_complex causes "Invalid argument" on
+  // some ffmpeg builds regardless of duration option. Safe pattern:
+  //   Step 1 — trim/loop music to voiceover_duration+2s (plain I/O, no filter)
+  //   Step 2 — amix two finite streams (no stream_loop involved)
+
+  const voiceDuration = await getAudioDuration(voiceFile);
+  const trimDuration  = voiceDuration + 2;
+
+  const trimmedMusicFile = outputFile.replace('final_audio', 'music_trimmed');
+
+  // Step 1: produce a finite music clip (loop until trimDuration, then stop)
+  // Output is .mp3 so use libmp3lame — writing AAC to an .mp3 container is invalid.
+  await execFileAsync('ffmpeg', [
+    '-y',
+    '-stream_loop', '-1', '-i', musicFile,
+    '-t', String(trimDuration),
+    '-c:a', 'libmp3lame', '-q:a', '4',
+    trimmedMusicFile,
+  ], { maxBuffer: 50 * 1024 * 1024 });
+  console.log(`[music] Trimmed music to ${trimDuration.toFixed(1)}s`);
+
+  // Step 2: mix voiceover (100%) + finite music (15%); duration=first trims to voice length
   await execFileAsync('ffmpeg', [
     '-y',
     '-i', voiceFile,
-    '-stream_loop', '-1', '-i', musicFile,
-    '-filter_complex',
-    '[1:a]volume=0.15,apad[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=1[out]',
+    '-i', trimmedMusicFile,
+    '-filter_complex', '[1:a]volume=0.15[bg];[0:a][bg]amix=inputs=2:duration=first[out]',
     '-map', '[out]',
     '-c:a', 'aac', '-b:a', '192k',
     outputFile,
   ], { maxBuffer: 100 * 1024 * 1024 });
-  console.log(`[music] Mixed audio → ${outputFile}`);
+  console.log(`[music] Mixed audio (${voiceDuration.toFixed(1)}s) → ${outputFile}`);
 }
 
 // ── Audio duration probe ──────────────────────────────────────────────────────

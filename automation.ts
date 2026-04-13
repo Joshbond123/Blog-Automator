@@ -1749,6 +1749,44 @@ async function uploadBufferToGithub(repo: string, token: string, buffer: Buffer,
   return url;
 }
 
+// Upsert (create or update) a file in GitHub — handles SHA automatically for updates.
+async function upsertFileToGithub(repo: string, token: string, buffer: Buffer, path: string, message: string) {
+  const { owner, name } = parseGithubRepo(repo);
+  const encodedPath = path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
+  const apiUrl = `https://api.github.com/repos/${owner}/${name}/contents/${encodedPath}`;
+
+  // Fetch current file SHA (needed to update an existing file)
+  let sha: string | undefined;
+  try {
+    const existing = await axios.get(apiUrl, outboundConfig({ headers: githubHeaders(token), timeout: 15000 }));
+    sha = String(existing.data?.sha || '').trim() || undefined;
+  } catch (e: any) {
+    if (e?.response?.status !== 404) throw e; // 404 = file doesn't exist yet, that's fine
+  }
+
+  const body: any = { message, content: buffer.toString('base64') };
+  if (sha) body.sha = sha;
+
+  const res = await axios.put(apiUrl, body, outboundConfig({ headers: githubHeaders(token), timeout: 30000 }));
+  console.log(`[github] Upserted ${path} (${(buffer.length / 1024).toFixed(0)}KB)${sha ? ' [updated]' : ' [created]'}`);
+  return String(res.data?.content?.download_url || '').trim();
+}
+
+// Sync the local render-video.mjs to the GitHub repo so GitHub Actions always uses the latest version.
+async function syncRenderScriptToGithub(repo: string, token: string) {
+  try {
+    const path = await import('path');
+    const fs = await import('fs');
+    const scriptPath = path.join(process.cwd(), 'scripts', 'render-video.mjs');
+    const scriptBuffer = Buffer.from(fs.readFileSync(scriptPath));
+    await upsertFileToGithub(repo, token, scriptBuffer, 'scripts/render-video.mjs', 'chore: sync render-video.mjs from automation platform');
+    console.log('[video] render-video.mjs synced to GitHub ✓');
+  } catch (err: any) {
+    console.warn('[video] Failed to sync render-video.mjs to GitHub:', err?.message || err);
+    // Non-fatal — workflow will use whatever version is already in the repo
+  }
+}
+
 async function dispatchTitleOverlayWorkflow(repo: string, token: string, sourceImageUrl: string, sourceImagePath: string, title: string, imgbbApiKey: string) {
   const { owner, name } = parseGithubRepo(repo);
   const correlationId = `overlay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -2476,7 +2514,9 @@ export async function runVideoAutomation(scheduleId: string) {
       console.log(`[video] Scene ${i + 1}/${scenes.length} generated & uploaded`);
     }
 
-    // ── 9. Dispatch GitHub Actions render_video workflow
+    // ── 9. Sync render script to GitHub then dispatch render_video workflow
+    console.log('[video] Syncing render script to GitHub...');
+    await syncRenderScriptToGithub(githubRepo, githubPat);
     const correlationId = `video-${ts}-${Math.random().toString(36).slice(2, 8)}`;
     await dispatchVideoRenderWorkflow(githubRepo, githubPat, voicePath, scenePaths, wordTimestamps, topic, correlationId);
 
