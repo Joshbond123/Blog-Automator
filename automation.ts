@@ -36,7 +36,11 @@ function outboundConfig(extra: Record<string, any> = {}) {
 
 const DEFAULT_CF_IMAGE_MODEL = '@cf/stabilityai/stable-diffusion-xl-base-1.0';
 
-const UNREALSPEECH_VOICES = ['Scarlett', 'Lily', 'Dan', 'Will', 'Amy', 'Olivia', 'Ryan', 'Melody'] as const;
+// Confirmed valid English VoiceId values for api.v8.unrealspeech.com/speech (verified from API)
+const UNREALSPEECH_VOICES = [
+  'Charlotte', 'Emily', 'Amelia', 'Ivy', 'Lauren', 'Willow', 'Kaitlyn', 'Hannah', 'Autumn', 'Eleanor', 'Sierra', 'Melody',
+  'Oliver', 'Caleb', 'Benjamin', 'Noah', 'Zane', 'Ethan', 'Arthur', 'Rowan', 'Daniel', 'Jasper',
+] as const;
 function pickRandomVoice(): string {
   return UNREALSPEECH_VOICES[Math.floor(Math.random() * UNREALSPEECH_VOICES.length)];
 }
@@ -2225,6 +2229,11 @@ async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: 
     return { buffer, wordTimestamps, voiceId };
   } catch (err: any) {
     await trackKeyUsage('unrealspeech_keys', 'unrealspeech_rotation_index', selected.key, false);
+    const respBody = err?.response?.data
+      ? JSON.stringify(err.response.data).slice(0, 400)
+      : '';
+    const status = err?.response?.status ?? '';
+    console.error(`[video] UnrealSpeech error ${status} voice=${voiceId}${respBody ? ' body=' + respBody : ''}`);
     throw err;
   }
 }
