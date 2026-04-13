@@ -20,11 +20,11 @@ async function startServer() {
   const PORT = Number(process.env.PORT || 3000);
 
   const SECRET_SETTING_FIELDS = ["blogger_client_id", "blogger_client_secret", "blogger_refresh_token"] as const;
-  const ARRAY_SETTING_FIELDS = new Set(["cloudflare_configs", "elevenlabs_keys", "cerebras_keys", "lightning_keys"]);
+  const ARRAY_SETTING_FIELDS = new Set(["cloudflare_configs", "unrealspeech_keys", "cerebras_keys", "lightning_keys"]);
   const SETTINGS_FIELDS = new Set([
     "supabase_url", "supabase_service_role_key", "supabase_access_token", "github_pat",
     "cloudflare_configs", "cloudflare_image_model", "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
-    "elevenlabs_keys", "cerebras_keys", "imgbb_api_key", "ads_html", "ads_scripts", "ads_placement", "lightning_keys"
+    "unrealspeech_keys", "unrealspeech_rotation_index", "cerebras_keys", "imgbb_api_key", "ads_html", "ads_scripts", "ads_placement", "lightning_keys"
   ]);
 
   const ensureArray = (value: any) => {
@@ -43,7 +43,7 @@ async function startServer() {
   const normalizeSettings = (settings: any = {}) => {
     const normalized = { ...settings };
     normalized.cloudflare_configs = ensureArray(normalized.cloudflare_configs);
-    normalized.elevenlabs_keys = ensureArray(normalized.elevenlabs_keys);
+    normalized.unrealspeech_keys = ensureArray(normalized.unrealspeech_keys);
     normalized.cerebras_keys = ensureArray(normalized.cerebras_keys);
     if (normalized.cerebras_keys.length === 0) normalized.cerebras_keys = ensureArray(normalized.lightning_keys);
     normalized.ads_placement = normalized.ads_placement || 'after';
@@ -255,7 +255,7 @@ async function startServer() {
       const cfg = getCurrentSupabaseConfig();
       res.json({
         cloudflare_configs: [],
-        elevenlabs_keys: [],
+        unrealspeech_keys: [],
         cerebras_keys: [],
         supabase_url: cfg.url || "",
         supabase_service_role_key: "",
@@ -294,7 +294,7 @@ async function startServer() {
       "supabase_url", "supabase_access_token", "supabase_service_role_key",
       "github_pat", "catbox_hash", "ads_html", "ads_scripts", "ads_placement",
       "blogger_client_id", "blogger_client_secret", "blogger_refresh_token",
-      "cloudflare_configs", "elevenlabs_keys", "cerebras_keys"
+      "cloudflare_configs", "unrealspeech_keys", "cerebras_keys"
     ]);
     const field = req.params.field;
     if (!allowedFields.has(field)) return res.status(400).json({ error: "Field not allowed" });

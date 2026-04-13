@@ -105,13 +105,13 @@ function extractCloudflareConfigsFromUnknownRow(rawValue: any): any[] {
   return [];
 }
 
-const ARRAY_SETTING_FIELDS = new Set(['cloudflare_configs', 'elevenlabs_keys', 'cerebras_keys', 'lightning_keys']);
+const ARRAY_SETTING_FIELDS = new Set(['cloudflare_configs', 'unrealspeech_keys', 'cerebras_keys', 'lightning_keys']);
 const KEY_VALUE_SETTING_FIELDS = new Set([
   'supabase_url', 'supabase_service_role_key', 'supabase_access_token', 'github_pat',
   'github_repo',
   'cloudflare_configs', 'blogger_client_id', 'blogger_client_secret', 'blogger_refresh_token',
-  'elevenlabs_keys', 'cerebras_keys', 'imgbb_api_key', 'ads_html', 'ads_scripts', 'ads_placement',
-  'cloudflare_rotation_index', 'elevenlabs_rotation_index', 'cerebras_rotation_index', 'lightning_keys', 'lightning_rotation_index',
+  'unrealspeech_keys', 'cerebras_keys', 'imgbb_api_key', 'ads_html', 'ads_scripts', 'ads_placement',
+  'cloudflare_rotation_index', 'unrealspeech_rotation_index', 'cerebras_rotation_index', 'lightning_keys', 'lightning_rotation_index',
   'cloudflare_image_model', 'global',
   'cloudflare_account_id', 'cloudflare_api_token', 'cloudflare_api_keys'
 ]);
@@ -191,19 +191,19 @@ async function getSettings() {
   }
 
   if (!Array.isArray(settings.cloudflare_configs)) settings.cloudflare_configs = [];
-  if (!Array.isArray(settings.elevenlabs_keys)) settings.elevenlabs_keys = [];
+  if (!Array.isArray(settings.unrealspeech_keys)) settings.unrealspeech_keys = [];
   if (!Array.isArray(settings.cerebras_keys)) settings.cerebras_keys = [];
   if (!Array.isArray(settings.lightning_keys)) settings.lightning_keys = [];
 
   settings.cloudflare_rotation_index = Number(settings.cloudflare_rotation_index || 0);
-  settings.elevenlabs_rotation_index = Number(settings.elevenlabs_rotation_index || 0);
+  settings.unrealspeech_rotation_index = Number(settings.unrealspeech_rotation_index || 0);
   settings.cerebras_rotation_index = Number(settings.cerebras_rotation_index || 0);
   settings.lightning_rotation_index = Number(settings.lightning_rotation_index || 0);
 
   settings.cloudflare_configs = settings.cloudflare_configs
     .map((c: any) => normalizeCloudflareConfig(c))
     .filter((c: any) => c.account_id && c.api_key);
-  settings.elevenlabs_keys = settings.elevenlabs_keys.map((k: any) => normalizeUsageEntry(k));
+  settings.unrealspeech_keys = settings.unrealspeech_keys.map((k: any) => normalizeUsageEntry(k));
   if (settings.cerebras_keys.length === 0 && settings.lightning_keys.length > 0) {
     settings.cerebras_keys = settings.lightning_keys.map((k: any) => normalizeUsageEntry(k));
     settings.cerebras_rotation_index = Number(settings.lightning_rotation_index || 0);
@@ -295,8 +295,8 @@ async function waitForCloudflareKeyAvailability(keys: string[]) {
 }
 
 async function pickRotatingKey(
-  listName: 'cloudflare_configs' | 'elevenlabs_keys' | 'cerebras_keys',
-  indexName: 'cloudflare_rotation_index' | 'elevenlabs_rotation_index' | 'cerebras_rotation_index',
+  listName: 'cloudflare_configs' | 'unrealspeech_keys' | 'cerebras_keys',
+  indexName: 'cloudflare_rotation_index' | 'unrealspeech_rotation_index' | 'cerebras_rotation_index',
 ) {
   const settings = await getSettings();
   const list = (settings[listName] || []).filter((item: any) => getEntryKey(item));
@@ -323,8 +323,8 @@ async function pickRotatingKey(
 }
 
 async function trackKeyUsage(
-  listName: 'cloudflare_configs' | 'elevenlabs_keys' | 'cerebras_keys',
-  indexName: 'cloudflare_rotation_index' | 'elevenlabs_rotation_index' | 'cerebras_rotation_index',
+  listName: 'cloudflare_configs' | 'unrealspeech_keys' | 'cerebras_keys',
+  indexName: 'cloudflare_rotation_index' | 'unrealspeech_rotation_index' | 'cerebras_rotation_index',
   usedKey: string,
   ok: boolean,
 ) {
@@ -937,19 +937,21 @@ async function createFinalBlogImageOrThrow(topic: string, niche: string, setting
 }
 
 async function generateVoiceover(text: string) {
-  const selected = await pickRotatingKey('elevenlabs_keys', 'elevenlabs_rotation_index');
+  const selected = await pickRotatingKey('unrealspeech_keys', 'unrealspeech_rotation_index');
 
   try {
     const res = await axios.post(
-      'https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL',
-      { text, model_id: 'eleven_flash_v2_5' },
-      { headers: { 'xi-api-key': selected.key }, responseType: 'arraybuffer' }
+      'https://api.v8.unrealspeech.com/speech',
+      { Text: text, VoiceId: 'Scarlett', Bitrate: '192k', Speed: '0', Pitch: '1', TimestampType: 'word' },
+      outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 120000 }),
     );
-
-    await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, true);
-    return Buffer.from(res.data);
+    const outputUri = String(res.data?.OutputUri || '').trim();
+    if (!outputUri) throw new Error('UnrealSpeech returned no OutputUri');
+    const audioRes = await axios.get(outputUri, outboundConfig({ responseType: 'arraybuffer', timeout: 120000 }));
+    await trackKeyUsage('unrealspeech_keys', 'unrealspeech_rotation_index', selected.key, true);
+    return Buffer.from(audioRes.data);
   } catch (err) {
-    await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, false);
+    await trackKeyUsage('unrealspeech_keys', 'unrealspeech_rotation_index', selected.key, false);
     throw err;
   }
 }
@@ -2171,49 +2173,49 @@ function estimateWordTimestamps(text: string, audioDurationSeconds?: number): Wo
 }
 
 async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: Buffer; wordTimestamps: WordTimestamp[] }> {
-  const selected = await pickRotatingKey('elevenlabs_keys', 'elevenlabs_rotation_index');
+  const selected = await pickRotatingKey('unrealspeech_keys', 'unrealspeech_rotation_index');
 
-  // Try the premium /with-timestamps endpoint first; fall back to standard TTS on 401/403
   try {
     const res = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL/with-timestamps`,
-      { text, model_id: 'eleven_flash_v2_5' },
-      outboundConfig({ headers: { 'xi-api-key': selected.key, 'Content-Type': 'application/json' }, timeout: 120000 }),
+      'https://api.v8.unrealspeech.com/speech',
+      { Text: text, VoiceId: 'Scarlett', Bitrate: '192k', Speed: '0', Pitch: '1', TimestampType: 'word' },
+      outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 120000 }),
     );
 
-    await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, true);
+    const outputUri = String(res.data?.OutputUri || '').trim();
+    const timestampsUri = String(res.data?.TimestampsUri || '').trim();
 
-    const audioBase64 = String(res.data?.audio_base64 || '').replace(/\s/g, '');
-    if (!audioBase64) throw new Error('ElevenLabs with-timestamps returned empty audio_base64');
+    if (!outputUri) throw new Error('UnrealSpeech returned no OutputUri');
 
-    const buffer = Buffer.from(audioBase64, 'base64');
-    const wordTimestamps = convertCharToWordTimestamps(res.data?.alignment || {});
-    console.log(`[video] Voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (aligned)`);
+    const [audioRes, tsRes] = await Promise.all([
+      axios.get(outputUri, outboundConfig({ responseType: 'arraybuffer', timeout: 120000 })),
+      timestampsUri
+        ? axios.get(timestampsUri, outboundConfig({ timeout: 30000 })).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    await trackKeyUsage('unrealspeech_keys', 'unrealspeech_rotation_index', selected.key, true);
+
+    const buffer = Buffer.from(audioRes.data);
+
+    let wordTimestamps: WordTimestamp[] = [];
+    if (tsRes?.data && Array.isArray(tsRes.data)) {
+      wordTimestamps = tsRes.data
+        .filter((t: any) => t && typeof t.word === 'string' && typeof t.start === 'number')
+        .map((t: any) => ({ word: t.word, start: t.start, end: t.end ?? t.start + 0.3 }));
+    }
+
+    if (!wordTimestamps.length) {
+      const estimatedDurationSeconds = (buffer.length * 8) / (192 * 1000);
+      wordTimestamps = estimateWordTimestamps(text, estimatedDurationSeconds);
+      console.log(`[video] UnrealSpeech voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (estimated)`);
+    } else {
+      console.log(`[video] UnrealSpeech voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (aligned)`);
+    }
+
     return { buffer, wordTimestamps };
   } catch (err: any) {
-    const status = Number(err?.response?.status || 0);
-    if (status === 401 || status === 403) {
-      // Plan does not support /with-timestamps — use standard TTS + estimated timestamps
-      console.warn(`[video] ElevenLabs /with-timestamps not available (${status}). Falling back to standard TTS with estimated timestamps.`);
-      try {
-        const res2 = await axios.post(
-          'https://api.elevenlabs.io/v1/text-to-speech/EXAVITQu4vr4xnSDxMaL',
-          { text, model_id: 'eleven_flash_v2_5' },
-          outboundConfig({ headers: { 'xi-api-key': selected.key }, responseType: 'arraybuffer', timeout: 120000 }),
-        );
-        await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, true);
-        const buffer = Buffer.from(res2.data);
-        // Estimate ~128kbps MP3 duration from buffer size
-        const estimatedDurationSeconds = (buffer.length * 8) / (128 * 1000);
-        const wordTimestamps = estimateWordTimestamps(text, estimatedDurationSeconds);
-        console.log(`[video] Voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (estimated)`);
-        return { buffer, wordTimestamps };
-      } catch (fallbackErr) {
-        await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, false);
-        throw fallbackErr;
-      }
-    }
-    await trackKeyUsage('elevenlabs_keys', 'elevenlabs_rotation_index', selected.key, false);
+    await trackKeyUsage('unrealspeech_keys', 'unrealspeech_rotation_index', selected.key, false);
     throw err;
   }
 }

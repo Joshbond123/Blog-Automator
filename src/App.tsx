@@ -1037,7 +1037,7 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
 const Settings = () => {
   const [settings, setSettings] = useState<any>({
     cloudflare_configs: [],
-    elevenlabs_keys: [],
+    unrealspeech_keys: [],
     cerebras_keys: [],
     ads_placement: 'after',
     cloudflare_image_model: '@cf/leonardo/phoenix-1.0'
@@ -1054,7 +1054,7 @@ const Settings = () => {
   const [fetchingFb, setFetchingFb] = useState(false);
   const [supabaseStatus, setSupabaseStatus] = useState<'idle' | 'verifying' | 'connected' | 'error'>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [elApiKey, setElApiKey] = useState('');
+  const [usApiKey, setUsApiKey] = useState('');
   const [cerebrasApiKey, setCerebrasApiKey] = useState('');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const maskValue = (value?: string, start = 6, end = 4) => {
@@ -1085,7 +1085,7 @@ const Settings = () => {
     return {
       ...raw,
       cloudflare_configs: safeArray(raw.cloudflare_configs),
-      elevenlabs_keys: safeArray(raw.elevenlabs_keys),
+      unrealspeech_keys: safeArray(raw.unrealspeech_keys),
       cerebras_keys: safeArray(raw.cerebras_keys).length ? safeArray(raw.cerebras_keys) : safeArray((raw as any).lightning_keys),
       ads_placement: raw.ads_placement || 'after'
     };
@@ -1321,7 +1321,7 @@ const Settings = () => {
     { id: 'github', label: 'GitHub', icon: Github },
     { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
     { id: 'facebook', label: 'Facebook', icon: Facebook },
-    { id: 'elevenlabs', label: 'ElevenLabs', icon: Mic },
+    { id: 'unrealspeech', label: 'UnrealSpeech', icon: Mic },
     { id: 'cerebras', label: 'Cerebras AI', icon: Video },
     { id: 'imgbb', label: 'ImgBB', icon: ImageIcon },
     { id: 'ads', label: 'Ads Settings', icon: Layout },
@@ -1459,7 +1459,7 @@ const Settings = () => {
   supabase_service_role_key TEXT,
   supabase_access_token TEXT,
   cloudflare_configs JSONB DEFAULT '[]',
-  elevenlabs_keys JSONB DEFAULT '[]',
+  unrealspeech_keys JSONB DEFAULT '[]',
   cerebras_keys JSONB DEFAULT '[]',
   github_pat TEXT,
   imgbb_api_key TEXT,
@@ -1472,7 +1472,8 @@ INSERT INTO settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
 -- Add missing columns if table exists
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS cloudflare_configs JSONB DEFAULT '[]';
-ALTER TABLE settings ADD COLUMN IF NOT EXISTS elevenlabs_keys JSONB DEFAULT '[]';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS unrealspeech_keys JSONB DEFAULT '[]';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS unrealspeech_rotation_index INTEGER DEFAULT 0;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS cerebras_keys JSONB DEFAULT '[]';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_url TEXT;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS supabase_service_role_key TEXT;
@@ -1953,60 +1954,94 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
               </div>
             )}
 
-            {activeSubTab === 'elevenlabs' && (
+            {activeSubTab === 'unrealspeech' && (
               <div className="space-y-8">
                 <div>
-                  <h3 className="text-3xl font-bold text-white tracking-tight">ElevenLabs Voice Settings</h3>
-                  <p className="text-zinc-400 mt-2 text-lg">Add multiple API keys for voice generation with automatic rotation.</p>
+                  <h3 className="text-3xl font-bold text-white tracking-tight">UnrealSpeech Voice Settings</h3>
+                  <p className="text-zinc-400 mt-2 text-lg">Add unlimited API keys for AI voice generation. Keys rotate automatically per request for maximum throughput.</p>
+                </div>
+
+                <div className="bg-gradient-to-br from-violet-950/30 to-zinc-950 border border-violet-800/40 rounded-3xl p-5 flex items-start gap-4">
+                  <div className="w-9 h-9 bg-violet-500/10 rounded-xl flex items-center justify-center shrink-0 mt-0.5">
+                    <Mic className="w-4 h-4 text-violet-400" />
+                  </div>
+                  <div>
+                    <p className="text-violet-300 font-semibold text-sm">UnrealSpeech — High-Quality AI Voice</p>
+                    <p className="text-zinc-500 text-sm mt-1">Voice: <span className="text-zinc-300 font-mono">Scarlett</span> · Bitrate: <span className="text-zinc-300 font-mono">192k</span> · Includes word-level timestamps for subtitle sync.</p>
+                    <a href="https://unrealspeech.com" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-violet-400 text-xs mt-2 hover:text-violet-300 transition-colors">
+                      Get API keys at unrealspeech.com <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
                 </div>
 
                 <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30 space-y-8">
                   <div className="space-y-4">
-                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">New API Key</label>
+                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Add New API Key</label>
                     <div className="flex flex-col sm:flex-row gap-4">
-                      <input 
+                      <input
                         type="password"
-                        value={elApiKey}
-                        onChange={(e) => setElApiKey(e.target.value)}
-                        placeholder="Enter ElevenLabs API Key..."
-                        className="flex-1 bg-zinc-950 border border-zinc-800 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-indigo-500 transition-all text-lg"
-                      />
-                      <button 
-                        onClick={() => {
-                          if (elApiKey.trim()) {
-                            const newKeys = [...(settings.elevenlabs_keys || []), { key: elApiKey.trim(), success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0,7) }];
-                            saveSection('elevenlabs', { elevenlabs_keys: newKeys });
-                            setElApiKey('');
+                        value={usApiKey}
+                        onChange={(e) => setUsApiKey(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && usApiKey.trim()) {
+                            const newKeys = [...(settings.unrealspeech_keys || []), { key: usApiKey.trim(), success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0, 7) }];
+                            saveSection('unrealspeech', { unrealspeech_keys: newKeys });
+                            setUsApiKey('');
                           }
                         }}
-                        disabled={!elApiKey.trim() || saving === 'elevenlabs'}
-                        className="bg-indigo-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-indigo-500 transition-all shadow-lg shadow-indigo-500/20 whitespace-nowrap disabled:opacity-50 flex items-center gap-2 justify-center"
+                        placeholder="Enter UnrealSpeech API Key..."
+                        className="flex-1 bg-zinc-950 border border-zinc-800 rounded-2xl px-6 py-4 text-white focus:outline-none focus:border-violet-500 transition-all text-lg font-mono"
+                      />
+                      <button
+                        onClick={() => {
+                          if (usApiKey.trim()) {
+                            const newKeys = [...(settings.unrealspeech_keys || []), { key: usApiKey.trim(), success_calls: 0, failed_calls: 0, total_calls: 0, monthly_calls: 0, monthly_period: new Date().toISOString().slice(0, 7) }];
+                            saveSection('unrealspeech', { unrealspeech_keys: newKeys });
+                            setUsApiKey('');
+                          }
+                        }}
+                        disabled={!usApiKey.trim() || saving === 'unrealspeech'}
+                        className="bg-violet-600 text-white px-8 py-4 rounded-2xl font-bold hover:bg-violet-500 transition-all shadow-lg shadow-violet-500/20 whitespace-nowrap disabled:opacity-50 flex items-center gap-2 justify-center"
                       >
-                        {saving === 'elevenlabs' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
-                        Save Key
+                        {saving === 'unrealspeech' ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
+                        Add Key
                       </button>
                     </div>
                   </div>
 
                   <div className="space-y-4">
-                    <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured API Keys</h4>
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Configured API Keys</h4>
+                      {settings.unrealspeech_keys?.length > 0 && (
+                        <span className="text-[10px] font-bold text-violet-400 uppercase tracking-wider bg-violet-500/10 px-3 py-1 rounded-full">
+                          {settings.unrealspeech_keys.length} key{settings.unrealspeech_keys.length !== 1 ? 's' : ''} · rotating
+                        </span>
+                      )}
+                    </div>
                     <div className="space-y-3">
-                      {settings.elevenlabs_keys?.map((item: any, idx: number) => (
+                      {settings.unrealspeech_keys?.map((item: any, idx: number) => (
                         <div key={idx} className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20 group hover:border-zinc-700 transition-colors">
                           <div className="flex items-center gap-4">
-                            <div className="w-10 h-10 bg-indigo-500/10 rounded-xl flex items-center justify-center">
-                              <Mic className="text-indigo-500 w-5 h-5" />
+                            <div className="w-10 h-10 bg-violet-500/10 rounded-xl flex items-center justify-center">
+                              <Mic className="text-violet-400 w-5 h-5" />
                             </div>
                             <div>
-                              <p className="text-white font-medium font-mono text-xs">{maskValue(item.key, 8, 4)}</p>
-                              <div className="flex items-center gap-4 mt-1">
+                              <div className="flex items-center gap-2">
+                                <p className="text-white font-medium font-mono text-xs">{maskValue(item.key, 8, 4)}</p>
+                                <span className="text-[9px] font-bold text-violet-500 bg-violet-500/10 px-2 py-0.5 rounded-full uppercase tracking-wider">Key #{idx + 1}</span>
+                              </div>
+                              <div className="flex items-center gap-4 mt-1.5">
                                 <div className="flex items-center gap-1.5">
-                                  <BarChart3 className="w-3 h-3 text-zinc-500" />
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-500" />
                                   <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.success_calls || 0} Success</span>
                                 </div>
                                 <div className="flex items-center gap-1.5">
-                                  <Database className="w-3 h-3 text-zinc-500" />
-                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.failed_calls || 0} Failed • {item.total_calls || 0} Total • {item.monthly_calls || 0} Monthly</span>
+                                  <XCircle className="w-3 h-3 text-rose-500" />
+                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.failed_calls || 0} Failed</span>
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  <BarChart3 className="w-3 h-3 text-zinc-500" />
+                                  <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">{item.total_calls || 0} Total</span>
                                 </div>
                               </div>
                             </div>
@@ -2014,30 +2049,32 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => {
-                                const key = prompt('ElevenLabs API Key', item.key || '') || item.key;
-                                const newKeys = settings.elevenlabs_keys.map((k: any, i: number) => i === idx ? { ...k, key } : k);
-                                saveSection('elevenlabs', { elevenlabs_keys: newKeys });
+                                const key = prompt('UnrealSpeech API Key', item.key || '') || item.key;
+                                const newKeys = settings.unrealspeech_keys.map((k: any, i: number) => i === idx ? { ...k, key } : k);
+                                saveSection('unrealspeech', { unrealspeech_keys: newKeys });
                               }}
-                              className="p-2 text-zinc-600 hover:text-indigo-400 transition-colors"
+                              className="p-2 text-zinc-600 hover:text-violet-400 transition-colors"
+                              title="Edit key"
                             >
-                              <Save className="w-5 h-5" />
+                              <Save className="w-4 h-4" />
                             </button>
-                            <button 
+                            <button
                               onClick={() => {
-                                const newKeys = settings.elevenlabs_keys.filter((_: any, i: number) => i !== idx);
-                                saveSection('elevenlabs', { elevenlabs_keys: newKeys });
+                                const newKeys = settings.unrealspeech_keys.filter((_: any, i: number) => i !== idx);
+                                saveSection('unrealspeech', { unrealspeech_keys: newKeys });
                               }}
                               className="p-2 text-zinc-600 hover:text-rose-500 transition-colors"
+                              title="Remove key"
                             >
-                              <Trash2 className="w-5 h-5" />
+                              <Trash2 className="w-4 h-4" />
                             </button>
                           </div>
                         </div>
                       ))}
                     </div>
-                    {(!settings.elevenlabs_keys || settings.elevenlabs_keys.length === 0) && (
+                    {(!settings.unrealspeech_keys || settings.unrealspeech_keys.length === 0) && (
                       <div className="p-12 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">
-                        No API keys added yet.
+                        No API keys added yet. Add your first UnrealSpeech key above.
                       </div>
                     )}
                   </div>

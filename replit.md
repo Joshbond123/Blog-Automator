@@ -9,7 +9,7 @@ An automated content generation and publishing system that creates blog posts an
 - **Frontend**: React 19, Vite 6, Tailwind CSS 4, Lucide React, Framer Motion
 - **Backend**: Express (Node.js), TypeScript via `tsx`
 - **Database**: Supabase (PostgreSQL)
-- **AI Services**: Cerebras (text), Cloudflare Workers AI (images), ElevenLabs (voice)
+- **AI Services**: Cerebras (text), Cloudflare Workers AI (images), UnrealSpeech (voice)
 - **Publishing**: Google Blogger API, Facebook Graph API
 - **File hosting**: Catbox.moe
 
