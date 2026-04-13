@@ -6,6 +6,25 @@ import { resolve } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
+// ── Viral background music pool (royalty-free, Mixkit Free License) ──────────
+const VIRAL_MUSIC_URLS = [
+  'https://assets.mixkit.co/music/preview/mixkit-tech-house-vibes-130.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-driving-ambition-32.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-hip-hop-02-738.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-deep-urban-623.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-hazy-after-hours-132.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-serene-view-443.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-life-is-a-dream-837.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-chill-vibes-113.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-inspirational-life-132.mp3',
+  'https://assets.mixkit.co/music/preview/mixkit-a-very-happy-christmas-897.mp3',
+];
+
+function pickRandomMusicUrl() {
+  return VIRAL_MUSIC_URLS[Math.floor(Math.random() * VIRAL_MUSIC_URLS.length)];
+}
+
+// ── GitHub asset download ─────────────────────────────────────────────────────
 async function downloadFromGitHub(repo, token, filePath, outputPath) {
   const encodedPath = filePath.split('/').map(encodeURIComponent).join('/');
   const res = await fetch(`https://api.github.com/repos/${repo}/contents/${encodedPath}`, {
@@ -32,6 +51,44 @@ async function downloadFromGitHub(repo, token, filePath, outputPath) {
   console.log(`[download] ${filePath} → ${outputPath} (${(size / 1024).toFixed(1)} KB)`);
 }
 
+// ── Background music download (with graceful fallback) ───────────────────────
+async function downloadMusicTrack(outputPath) {
+  const musicUrl = pickRandomMusicUrl();
+  console.log(`[music] Selected track: ${musicUrl}`);
+
+  try {
+    const res = await fetch(musicUrl, { signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 20 * 1024) throw new Error(`Music track too small (${buf.length} bytes)`);
+    await fs.writeFile(outputPath, buf);
+    const size = statSync(outputPath).size;
+    console.log(`[music] Downloaded ${(size / 1024).toFixed(0)}KB`);
+    return true;
+  } catch (err) {
+    console.warn(`[music] Download failed (${err?.message}). Video will render without background music.`);
+    return false;
+  }
+}
+
+// ── Mix voiceover + background music ─────────────────────────────────────────
+async function mixAudioWithMusic(voiceFile, musicFile, outputFile) {
+  // Stream-loop music so it always covers the full voiceover length.
+  // Volume: voiceover at 100%, music at 15% (-16.5 dB) for balanced mix.
+  await execFileAsync('ffmpeg', [
+    '-y',
+    '-i', voiceFile,
+    '-stream_loop', '-1', '-i', musicFile,
+    '-filter_complex',
+    '[1:a]volume=0.15,apad[bg];[0:a][bg]amix=inputs=2:duration=first:dropout_transition=1[out]',
+    '-map', '[out]',
+    '-c:a', 'aac', '-b:a', '192k',
+    outputFile,
+  ], { maxBuffer: 100 * 1024 * 1024 });
+  console.log(`[music] Mixed audio → ${outputFile}`);
+}
+
+// ── Audio duration probe ──────────────────────────────────────────────────────
 async function getAudioDuration(audioPath) {
   const { stdout } = await execFileAsync('ffprobe', [
     '-v', 'error',
@@ -44,51 +101,55 @@ async function getAudioDuration(audioPath) {
   return d;
 }
 
+// ── ASS subtitle time format ──────────────────────────────────────────────────
 function toAssTime(seconds) {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
-  const cs = Math.round(((seconds - Math.floor(seconds)) * 100));
+  const cs = Math.round((seconds - Math.floor(seconds)) * 100);
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
 }
 
+// ── Viral-style ASS subtitles (9:16 vertical, centered, bold, word-by-word) ──
 function buildAssSubtitles(wordTimestamps) {
-  const style = [
+  // Bold white text, black outline, centered middle of screen — TikTok style.
+  // PlayRes matches 1080×1920 (9:16). Alignment=5 → middle-center.
+  const styleFields = [
     'Style: viral',
     'Arial',
-    '72',
-    '&H00FFFFFF',
-    '&H00FFFFFF',
-    '&H00000000',
-    '&H80000000',
-    '-1',
-    '0',
-    '0',
-    '0',
-    '100',
-    '100',
-    '0',
-    '0',
-    '1',
-    '4',
-    '2',
-    '5',
-    '30',
-    '30',
-    '80',
-    '1',
+    '88',          // Fontsize — large & readable on mobile
+    '&H00FFFFFF',  // PrimaryColour: white
+    '&H00FFFFFF',  // SecondaryColour
+    '&H00000000',  // OutlineColour: black
+    '&H96000000',  // BackColour: 60% transparent black shadow
+    '-1',          // Bold: yes
+    '0',           // Italic: no
+    '0',           // Underline: no
+    '0',           // StrikeOut: no
+    '100',         // ScaleX
+    '100',         // ScaleY
+    '0',           // Spacing
+    '0',           // Angle
+    '1',           // BorderStyle: outline + drop shadow
+    '5',           // Outline width
+    '2',           // Shadow depth
+    '5',           // Alignment: 5 = middle-center (TikTok position)
+    '60',          // MarginL
+    '60',          // MarginR
+    '0',           // MarginV
+    '1',           // Encoding
   ].join(',');
 
   const header = `[Script Info]
 ScriptType: v4.00+
 WrapStyle: 0
-PlayResX: 1280
-PlayResY: 720
+PlayResX: 1080
+PlayResY: 1920
 ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-${style}
+${styleFields}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`;
@@ -109,12 +170,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text`
   return `${header}\n${events}\n`;
 }
 
+// ── Scene video (vertical 1080×1920, Ken Burns zoom) ─────────────────────────
 async function buildSceneVideo(imagePath, outputPath, duration, sceneIndex) {
   const frames = Math.max(24, Math.ceil(duration * 24));
   const zoomDir = sceneIndex % 2 === 0 ? 'in' : 'out';
   const zoomExpr = zoomDir === 'in'
-    ? `min(zoom+0.0004,1.25)`
-    : `if(eq(on\\,1)\\,1.25\\,max(zoom-0.0004\\,1.0))`;
+    ? `min(zoom+0.0003,1.3)`
+    : `if(eq(on\\,1)\\,1.3\\,max(zoom-0.0003\\,1.0))`;
 
   await execFileAsync('ffmpeg', [
     '-y',
@@ -122,23 +184,24 @@ async function buildSceneVideo(imagePath, outputPath, duration, sceneIndex) {
     '-t', String(duration + 0.5),
     '-i', imagePath,
     '-vf', [
-      'scale=1280:720:force_original_aspect_ratio=increase',
-      'crop=1280:720',
-      `zoompan=z='${zoomExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=1280x720:fps=24`,
+      'scale=1080:1920:force_original_aspect_ratio=increase',
+      'crop=1080:1920',
+      `zoompan=z='${zoomExpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${frames}:s=1080x1920:fps=24`,
       'format=yuv420p',
     ].join(','),
     '-c:v', 'libx264',
     '-preset', 'fast',
-    '-crf', '23',
+    '-crf', '22',
     '-r', '24',
     '-pix_fmt', 'yuv420p',
     '-t', String(duration),
     outputPath,
-  ], { maxBuffer: 100 * 1024 * 1024 });
+  ], { maxBuffer: 150 * 1024 * 1024 });
 
-  console.log(`[scene] ${outputPath} rendered (${duration.toFixed(2)}s, ${zoomDir} zoom)`);
+  console.log(`[scene] ${outputPath} rendered (${duration.toFixed(2)}s, zoom-${zoomDir})`);
 }
 
+// ── Main render pipeline ──────────────────────────────────────────────────────
 async function main() {
   const repo = process.env.GITHUB_REPOSITORY;
   const token = process.env.GITHUB_TOKEN;
@@ -148,7 +211,7 @@ async function main() {
   const correlationId = String(process.env.CORRELATION_ID || `video-${Date.now()}`).trim();
   const title = String(process.env.TITLE_TEXT || '').trim();
 
-  console.log(`[render-video] Starting render for correlationId=${correlationId}`);
+  console.log(`[render-video] correlationId=${correlationId}`);
   console.log(`[render-video] Scenes: ${scenePaths.length}, Words: ${wordTimestamps.length}`);
 
   if (!repo || !token) throw new Error('Missing GITHUB_REPOSITORY or GITHUB_TOKEN');
@@ -157,9 +220,11 @@ async function main() {
 
   await fs.mkdir('render_workspace', { recursive: true });
 
+  // ── 1. Download voiceover ──────────────────────────────────────────────────
   const voiceFile = 'render_workspace/voiceover.mp3';
   await downloadFromGitHub(repo, token, voiceoverPath, voiceFile);
 
+  // ── 2. Download scene images ───────────────────────────────────────────────
   const sceneFiles = [];
   for (let i = 0; i < scenePaths.length; i++) {
     const sceneFile = `render_workspace/scene_${i}.jpg`;
@@ -168,12 +233,18 @@ async function main() {
   }
 
   const totalDuration = await getAudioDuration(voiceFile);
-  console.log(`[render-video] Audio duration: ${totalDuration.toFixed(2)}s`);
+  console.log(`[render-video] Voiceover duration: ${totalDuration.toFixed(2)}s`);
 
+  // ── 3. Download background music (non-fatal) ───────────────────────────────
+  const musicFile = 'render_workspace/music.mp3';
+  const hasMusicTrack = await downloadMusicTrack(musicFile);
+
+  // ── 4. Build word-by-word ASS subtitles ───────────────────────────────────
   const assContent = buildAssSubtitles(wordTimestamps);
   await fs.writeFile('render_workspace/subtitles.ass', assContent, 'utf8');
-  console.log(`[render-video] ASS subtitles: ${wordTimestamps.length} words`);
+  console.log(`[render-video] ASS subtitles built: ${wordTimestamps.length} words`);
 
+  // ── 5. Render individual scene videos (1080×1920 vertical) ────────────────
   const sceneDuration = totalDuration / sceneFiles.length;
   const sceneVideos = [];
   for (let i = 0; i < sceneFiles.length; i++) {
@@ -182,6 +253,7 @@ async function main() {
     sceneVideos.push(videoFile);
   }
 
+  // ── 6. Concatenate scene videos ────────────────────────────────────────────
   const concatList = sceneVideos.map((f) => `file '${resolve(f).replace(/'/g, "'\\''")}'`).join('\n');
   await fs.writeFile('render_workspace/concat_list.txt', concatList, 'utf8');
 
@@ -189,36 +261,48 @@ async function main() {
   await execFileAsync('ffmpeg', [
     '-y', '-f', 'concat', '-safe', '0',
     '-i', 'render_workspace/concat_list.txt',
-    '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+    '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
     '-pix_fmt', 'yuv420p', '-r', '24',
     'render_workspace/video_scenes.mp4',
-  ], { maxBuffer: 200 * 1024 * 1024 });
+  ], { maxBuffer: 300 * 1024 * 1024 });
 
-  console.log('[render-video] Adding voiceover audio...');
+  // ── 7. Mix audio: voiceover + background music ────────────────────────────
+  const finalAudioFile = 'render_workspace/final_audio.mp3';
+  if (hasMusicTrack) {
+    await mixAudioWithMusic(voiceFile, musicFile, finalAudioFile);
+  } else {
+    // No music — just use raw voiceover
+    await fs.copyFile(voiceFile, finalAudioFile);
+    console.log('[render-video] Using voiceover-only audio (no background music).');
+  }
+
+  // ── 8. Combine video + final audio ────────────────────────────────────────
+  console.log('[render-video] Combining video + audio...');
   await execFileAsync('ffmpeg', [
     '-y',
     '-i', 'render_workspace/video_scenes.mp4',
-    '-i', voiceFile,
+    '-i', finalAudioFile,
     '-c:v', 'copy',
-    '-c:a', 'aac', '-b:a', '128k',
+    '-c:a', 'aac', '-b:a', '192k',
     '-map', '0:v:0', '-map', '1:a:0',
     '-shortest',
     'render_workspace/video_audio.mp4',
-  ], { maxBuffer: 200 * 1024 * 1024 });
+  ], { maxBuffer: 300 * 1024 * 1024 });
 
+  // ── 9. Burn subtitles into video ───────────────────────────────────────────
   console.log('[render-video] Burning subtitles...');
   await execFileAsync('ffmpeg', [
     '-y',
     '-i', 'render_workspace/video_audio.mp4',
     '-vf', `ass=render_workspace/subtitles.ass`,
-    '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+    '-c:v', 'libx264', '-preset', 'fast', '-crf', '21',
     '-c:a', 'copy',
     'output.mp4',
-  ], { maxBuffer: 300 * 1024 * 1024 });
+  ], { maxBuffer: 400 * 1024 * 1024 });
 
   const outputSize = statSync('output.mp4').size;
   if (outputSize < 100 * 1024) throw new Error(`Output video too small: ${outputSize} bytes`);
-  console.log(`[render-video] Final video: output.mp4 (${(outputSize / 1024 / 1024).toFixed(2)} MB, ${totalDuration.toFixed(1)}s)`);
+  console.log(`[render-video] ✓ output.mp4 — ${(outputSize / 1024 / 1024).toFixed(2)} MB, ${totalDuration.toFixed(1)}s, ${hasMusicTrack ? 'with music' : 'voice only'}`);
 
   const result = {
     correlationId,
@@ -227,6 +311,8 @@ async function main() {
     videoSizeMB: parseFloat((outputSize / 1024 / 1024).toFixed(2)),
     wordCount: wordTimestamps.length,
     sceneCount: sceneFiles.length,
+    hasBackgroundMusic: hasMusicTrack,
+    resolution: '1080x1920',
     outputFile: 'output.mp4',
     timestamp: new Date().toISOString(),
   };

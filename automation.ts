@@ -35,6 +35,11 @@ function outboundConfig(extra: Record<string, any> = {}) {
 }
 
 const DEFAULT_CF_IMAGE_MODEL = '@cf/stabilityai/stable-diffusion-xl-base-1.0';
+
+const UNREALSPEECH_VOICES = ['Scarlett', 'Lily', 'Dan', 'Will', 'Amy', 'Olivia', 'Ryan', 'Melody'] as const;
+function pickRandomVoice(): string {
+  return UNREALSPEECH_VOICES[Math.floor(Math.random() * UNREALSPEECH_VOICES.length)];
+}
 const LEGACY_IMAGE_MODELS = new Set([
   '@cf/black-forest-labs/flux-1-schnell',
   '@cf/black-forest-labs/flux-2-dev',
@@ -938,11 +943,13 @@ async function createFinalBlogImageOrThrow(topic: string, niche: string, setting
 
 async function generateVoiceover(text: string) {
   const selected = await pickRotatingKey('unrealspeech_keys', 'unrealspeech_rotation_index');
+  const voiceId = pickRandomVoice();
 
   try {
+    console.log(`[voice] Using UnrealSpeech voice: ${voiceId}`);
     const res = await axios.post(
       'https://api.v8.unrealspeech.com/speech',
-      { Text: text, VoiceId: 'Scarlett', Bitrate: '192k', Speed: '0', Pitch: '1', TimestampType: 'word' },
+      { Text: text, VoiceId: voiceId, Bitrate: '192k', Speed: '0', Pitch: '1', TimestampType: 'word' },
       outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 120000 }),
     );
     const outputUri = String(res.data?.OutputUri || '').trim();
@@ -2172,13 +2179,15 @@ function estimateWordTimestamps(text: string, audioDurationSeconds?: number): Wo
   return timestamps;
 }
 
-async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: Buffer; wordTimestamps: WordTimestamp[] }> {
+async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: Buffer; wordTimestamps: WordTimestamp[]; voiceId: string }> {
   const selected = await pickRotatingKey('unrealspeech_keys', 'unrealspeech_rotation_index');
+  const voiceId = pickRandomVoice();
 
   try {
+    console.log(`[video] UnrealSpeech voice selected: ${voiceId}`);
     const res = await axios.post(
       'https://api.v8.unrealspeech.com/speech',
-      { Text: text, VoiceId: 'Scarlett', Bitrate: '192k', Speed: '0', Pitch: '1', TimestampType: 'word' },
+      { Text: text, VoiceId: voiceId, Bitrate: '192k', Speed: '0', Pitch: '1', TimestampType: 'word' },
       outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 120000 }),
     );
 
@@ -2208,12 +2217,12 @@ async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: 
     if (!wordTimestamps.length) {
       const estimatedDurationSeconds = (buffer.length * 8) / (192 * 1000);
       wordTimestamps = estimateWordTimestamps(text, estimatedDurationSeconds);
-      console.log(`[video] UnrealSpeech voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (estimated)`);
+      console.log(`[video] UnrealSpeech voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (estimated), voice=${voiceId}`);
     } else {
-      console.log(`[video] UnrealSpeech voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (aligned)`);
+      console.log(`[video] UnrealSpeech voiceover: ${(buffer.length / 1024).toFixed(0)}KB, ${wordTimestamps.length} word timestamps (aligned), voice=${voiceId}`);
     }
 
-    return { buffer, wordTimestamps };
+    return { buffer, wordTimestamps, voiceId };
   } catch (err: any) {
     await trackKeyUsage('unrealspeech_keys', 'unrealspeech_rotation_index', selected.key, false);
     throw err;
@@ -2435,8 +2444,9 @@ export async function runVideoAutomation(scheduleId: string) {
 
     // ── 6. Generate voiceover with word-level timestamps
     console.log('[video] Generating voiceover with timestamps...');
-    const { buffer: voiceBuffer, wordTimestamps } = await generateVoiceoverWithTimestamps(voiceover);
+    const { buffer: voiceBuffer, wordTimestamps, voiceId: selectedVoiceId } = await generateVoiceoverWithTimestamps(voiceover);
     if (voiceBuffer.length < 5000) throw new Error('Voiceover audio buffer too small');
+    console.log(`[video] Voice: ${selectedVoiceId}`);
 
     // ── 7. Upload voiceover to GitHub
     const ts = Date.now();
