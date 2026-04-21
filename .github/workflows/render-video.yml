@@ -8,7 +8,7 @@ on:
 jobs:
   render:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -16,24 +16,46 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: remotion/package-lock.json
 
-      - name: Install ffmpeg and fonts
+      - name: Install ffmpeg + Chromium runtime libs
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-liberation fonts-open-sans
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg \
+            fonts-liberation fonts-open-sans fonts-noto-color-emoji \
+            libnss3 libxss1 libasound2 libatk-bridge2.0-0 libgtk-3-0 \
+            libgbm1 libxshmfence1 libdrm2 libxkbcommon0 libxcomposite1 \
+            libxdamage1 libxrandr2 libpangocairo-1.0-0 libpango-1.0-0 \
+            libcairo2 libxext6 libx11-xcb1
           ffmpeg -version | head -1
           ffprobe -version | head -1
 
-      - name: Render video
+      - name: Install Remotion dependencies
+        working-directory: remotion
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Ensure Remotion Chromium is available
+        working-directory: remotion
+        run: npx --no-install remotion browser ensure || true
+
+      - name: Render video (Remotion)
         env:
           VOICEOVER_GITHUB_PATH: ${{ github.event.client_payload.voiceoverPath }}
           SCENE_GITHUB_PATHS: ${{ github.event.client_payload.scenePaths }}
           WORD_TIMESTAMPS_JSON: ${{ github.event.client_payload.wordTimestamps }}
           TITLE_TEXT: ${{ github.event.client_payload.title }}
+          CTA_TEXT: ${{ github.event.client_payload.cta }}
+          HOOK_TEXT: ${{ github.event.client_payload.hookText }}
           CORRELATION_ID: ${{ github.event.client_payload.correlationId }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          node scripts/render-video.mjs
+        run: node scripts/render-video.mjs
 
       - name: Upload video artifact
         uses: actions/upload-artifact@v4
