@@ -1,0 +1,19 @@
+{
+  "name": "viral-video-remotion",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Remotion composition for vertical viral short-form video rendering.",
+  "scripts": {
+    "render": "remotion render src/index.ts ViralVideo out/output.mp4"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.230",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "remotion": "4.0.230"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.3",
+    "typescript": "5.4.5"
+  }
+}
