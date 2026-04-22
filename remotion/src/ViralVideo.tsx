@@ -108,31 +108,35 @@ const SceneClip: React.FC<{ src: string; index: number; durationInFrames: number
 
 type Phrase = { text: string; start: number; end: number };
 
-function groupWordsIntoPhrases(words: Word[], maxWords = 3, maxChars = 22): Phrase[] {
+// Viral TikTok / Reels style: 1 short word per beat, or 2 if the words are
+// very short (≤4 chars each) and combined length stays tiny. Each chunk
+// hard-syncs to the voiceover word timestamps so subtitles never lag, never
+// stack, and never appear in big broken blocks.
+function groupWordsIntoPhrases(words: Word[]): Phrase[] {
   const phrases: Phrase[] = [];
-  let bucket: Word[] = [];
-  let bucketChars = 0;
-
-  const flush = () => {
-    if (!bucket.length) return;
-    phrases.push({
-      text: bucket.map((w) => w.word).join(" "),
-      start: bucket[0].start,
-      end: bucket[bucket.length - 1].end,
-    });
-    bucket = [];
-    bucketChars = 0;
-  };
-
-  for (const w of words) {
-    const wLen = (w.word || "").length;
-    if (bucket.length >= maxWords || bucketChars + wLen + 1 > maxChars) {
-      flush();
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    const next = words[i + 1];
+    const cleanA = (w.word || "").trim();
+    const cleanB = (next?.word || "").trim();
+    // Pair very short consecutive words (e.g. "in the", "to be") so a single
+    // 2-letter word doesn't flash for 200ms.
+    if (
+      next &&
+      cleanA.length <= 4 &&
+      cleanB.length <= 4 &&
+      cleanA.length + cleanB.length <= 7
+    ) {
+      phrases.push({
+        text: `${cleanA} ${cleanB}`,
+        start: w.start,
+        end: next.end,
+      });
+      i += 1;
+    } else {
+      phrases.push({ text: cleanA, start: w.start, end: w.end });
     }
-    bucket.push(w);
-    bucketChars += wLen + 1;
   }
-  flush();
   return phrases;
 }
 
@@ -326,7 +330,8 @@ export const ViralVideo: React.FC<ViralProps> = ({
 
       <HookOverlay text={hookText} />
       <Subtitles words={words} />
-      <CTAOverlay text={cta} />
+      {/* No visual CTA overlay — the call-to-action is delivered as the spoken
+          last sentence of the voiceover (like / share / follow / link in bio). */}
 
       <Audio src={staticFile(audioSrc)} />
       {hasMusic ? <Audio src={staticFile(musicSrc)} volume={0.15} /> : null}
