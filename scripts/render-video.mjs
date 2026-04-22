@@ -190,9 +190,21 @@ async function main() {
     sceneRelPaths.push(`render-assets/${localName}`);
   }
 
-  // 3. Voice duration
-  const voiceDuration = await getAudioDuration(voiceFile);
-  console.log(`[render-video] Voiceover duration: ${voiceDuration.toFixed(2)}s`);
+  // 3. Voice duration — hard-clamped between 8s and 75s so a bad ffprobe
+  // reading or an unexpectedly long voice file can NEVER produce a runaway
+  // multi-minute (or multi-hour) render. Target is ~60s viral short.
+  const probedDuration = await getAudioDuration(voiceFile);
+  const HARD_MIN = 8;
+  const HARD_MAX = 75;
+  const voiceDuration = Math.min(HARD_MAX, Math.max(HARD_MIN, probedDuration));
+  if (voiceDuration !== probedDuration) {
+    console.warn(
+      `[render-video] Probed voice duration ${probedDuration.toFixed(2)}s clamped to ${voiceDuration.toFixed(2)}s ` +
+        `(viral short cap: ${HARD_MIN}-${HARD_MAX}s).`
+    );
+  } else {
+    console.log(`[render-video] Voiceover duration: ${voiceDuration.toFixed(2)}s`);
+  }
 
   // 4. Music: download → loop/trim to voice duration
   const rawMusic = join(ASSETS_DIR, "music_raw.mp3");
