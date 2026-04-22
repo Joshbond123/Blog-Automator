@@ -334,7 +334,7 @@ export const ViralVideo: React.FC<ViralProps> = ({
           last sentence of the voiceover (like / share / follow / link in bio). */}
 
       <Audio src={staticFile(audioSrc)} />
-      {hasMusic ? <Audio src={staticFile(musicSrc)} volume={0.15} /> : null}
+      {hasMusic ? <Audio src={staticFile(musicSrc)} volume={0.06} /> : null}
     </AbsoluteFill>
   );
 };
