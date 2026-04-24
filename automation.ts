@@ -2248,6 +2248,7 @@ export async function runBlogAutomation(scheduleId: string) {
 
     // Generate hashtags — these go ONLY to Blogger labels, NEVER into the article body
     const hashtags = await generateViralHashtags(topic, niche, cleanedArticle);
+    console.log(`[blog] ✓ Viral hashtags: ${hashtags.join(' ')}`);
 
     // Strict pre-publish content validation
     const articlePlain = stripHtml(cleanedArticle);
@@ -2940,6 +2941,7 @@ export async function runVideoAutomation(scheduleId: string) {
     console.log('[video] Generating video script...');
     const videoScript = await generateVideoScript(topic, niche);
     const { voiceover, scenes, hashtags } = videoScript;
+    console.log(`[video] ✓ Viral hashtags: ${hashtags.join(' ')}`);
     console.log(`[video] Script: ${voiceover.split(' ').length} words, ${scenes.length} scenes`);
 
     // ── 6. Generate voiceover with word-level timestamps
