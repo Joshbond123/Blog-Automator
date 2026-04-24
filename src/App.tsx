@@ -28,12 +28,38 @@ import {
   Key as KeyIcon,
   Layout,
   Code,
-  Check
+  Check,
+  ShieldCheck,
+  LogOut,
+  Lock,
+  Eye,
+  EyeOff,
+  Copy
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import { supabase, NICHES, type BloggerAccount, type FacebookPage, type Schedule, type Post, type Niche } from './types';
+import { HomePage, AboutPage, PrivacyPage, TermsPage, ContactPage, DataDeletionPage } from './pages/Public';
+import AppVerification from './pages/AppVerification';
+import { PUBLIC_PATHS, usePathname, navigate } from './router';
+
+const DEFAULT_PASSWORD = 'joshbond';
+const PASSWORD_KEY = 'blog_automator_password';
+const AUTH_KEY = 'blog_automator_authed';
+
+export const getStoredPassword = () => {
+  try { return localStorage.getItem(PASSWORD_KEY) || DEFAULT_PASSWORD; } catch { return DEFAULT_PASSWORD; }
+};
+export const setStoredPassword = (pw: string) => {
+  try { localStorage.setItem(PASSWORD_KEY, pw); } catch {}
+};
+export const isAuthed = () => {
+  try { return localStorage.getItem(AUTH_KEY) === '1'; } catch { return false; }
+};
+export const setAuthed = (v: boolean) => {
+  try { v ? localStorage.setItem(AUTH_KEY, '1') : localStorage.removeItem(AUTH_KEY); } catch {}
+};
 
 // --- Utility ---
 function cn(...inputs: ClassValue[]) {
@@ -46,18 +72,21 @@ const Sidebar = ({
   activeTab, 
   setActiveTab, 
   isOpen, 
-  onClose 
+  onClose,
+  onLogout,
 }: { 
   activeTab: string, 
   setActiveTab: (tab: string) => void,
   isOpen: boolean,
-  onClose: () => void
+  onClose: () => void,
+  onLogout: () => void,
 }) => {
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'blogger', label: 'Blogger Accounts', icon: BookOpen },
     { id: 'blog-scheduler', label: 'Blog Scheduler', icon: Clock },
     { id: 'video-scheduler', label: 'Video Scheduler', icon: Video },
+    { id: 'app-verification', label: 'App Verification', icon: ShieldCheck },
     { id: 'settings', label: 'Settings', icon: SettingsIcon },
   ];
 
@@ -148,7 +177,13 @@ const Sidebar = ({
           ))}
         </nav>
 
-        <div className="p-6 mt-auto">
+        <div className="p-4 mt-auto space-y-3">
+          <button
+            onClick={onLogout}
+            className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-800 hover:border-zinc-700 transition text-sm font-semibold"
+          >
+            <LogOut className="w-4 h-4" /> Sign Out
+          </button>
           <p className="text-[10px] text-zinc-600 text-center font-medium uppercase tracking-widest">
             v1.0.0 • Production
           </p>
@@ -766,6 +801,34 @@ const BloggerAccounts = () => {
   );
 };
 
+const getBrowserTimezone = () => {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; }
+};
+
+// Convert "HH:mm" + IANA tz to the equivalent "HH:mm" in the browser's local zone (for display only).
+const formatScheduleTimeForDisplay = (raw: string, tz: string) => {
+  const m = (raw || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return raw || '';
+  const hh = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  const localTz = getBrowserTimezone();
+  if (!tz || tz === localTz) return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  try {
+    // Build today's date at hh:mm in the schedule's tz, then format in local tz.
+    const now = new Date();
+    const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+    const guessUtc = Date.parse(`${ymd}T${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}:00Z`);
+    const lp = new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date(guessUtc));
+    const lh = Number(lp.find(p => p.type === 'hour')?.value || 0);
+    const lm = Number(lp.find(p => p.type === 'minute')?.value || 0);
+    const offsetMin = (lh * 60 + lm) - (hh * 60 + mm);
+    const utcMs = guessUtc - offsetMin * 60_000;
+    return new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(utcMs));
+  } catch {
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+};
+
 const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [accounts, setAccounts] = useState<BloggerAccount[]>([]);
@@ -774,6 +837,7 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
   const [showAdd, setShowAdd] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
 
+  const browserTz = getBrowserTimezone();
   const [newSchedule, setNewSchedule] = useState({ target_id: '', schedule_time: '12:00' });
   const [addError, setAddError] = useState<string | null>(null);
 
@@ -809,7 +873,7 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
           channel: type,
           target_id: newSchedule.target_id,
           schedule_time: newSchedule.schedule_time,
-          timezone: 'UTC',
+          timezone: browserTz,
           is_enabled: true,
           metadata: {}
         })
@@ -913,7 +977,7 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                     <h4 className="text-white font-bold">{target?.name || 'Unknown Target'}</h4>
                     <div className="flex items-center gap-3 mt-1">
                       <span className="flex items-center gap-1 text-zinc-500 text-sm">
-                        <Clock className="w-3 h-3" /> {s.schedule_time?.slice(0, 5)} Daily
+                        <Clock className="w-3 h-3" /> {formatScheduleTimeForDisplay(s.schedule_time, s.timezone || 'UTC')} Daily ({s.timezone || 'UTC'})
                       </span>
                       <span className="w-1 h-1 bg-zinc-700 rounded-full" />
                       <span className="text-indigo-400 text-xs font-bold uppercase tracking-wider">
@@ -1010,7 +1074,7 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                   )}
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-zinc-400">Daily Posting Time (UTC)</label>
+                  <label className="text-sm font-medium text-zinc-400">Daily Posting Time (your local time · {browserTz})</label>
                   <input 
                     required
                     type="time" 
@@ -1030,6 +1094,104 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
           </div>
         )}
       </AnimatePresence>
+    </div>
+  );
+};
+
+const PasswordSettings = () => {
+  const [current, setCurrent] = useState('');
+  const [next, setNext] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [show, setShow] = useState(false);
+  const [msg, setMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setMsg(null);
+    if (current !== getStoredPassword()) {
+      setMsg({ type: 'err', text: 'Current password is incorrect.' });
+      return;
+    }
+    if (next.length < 4) {
+      setMsg({ type: 'err', text: 'New password must be at least 4 characters.' });
+      return;
+    }
+    if (next !== confirm) {
+      setMsg({ type: 'err', text: 'New password and confirmation do not match.' });
+      return;
+    }
+    setSaving(true);
+    setTimeout(() => {
+      setStoredPassword(next);
+      setSaving(false);
+      setCurrent(''); setNext(''); setConfirm('');
+      setMsg({ type: 'ok', text: 'Password updated successfully. Use it on your next sign-in.' });
+    }, 300);
+  };
+
+  const inputType = show ? 'text' : 'password';
+
+  return (
+    <div className="space-y-8">
+      <div>
+        <h3 className="text-3xl font-bold text-white tracking-tight">Login Password Settings</h3>
+        <p className="text-zinc-400 mt-2 text-lg">Change the password used to access this dashboard.</p>
+      </div>
+
+      <div className="bg-gradient-to-b from-zinc-900 to-zinc-950 border border-zinc-800 rounded-3xl p-6 lg:p-8 shadow-2xl shadow-black/30">
+        <form onSubmit={submit} className="space-y-6 max-w-xl">
+          {[
+            { label: 'Current Password', value: current, set: setCurrent, ph: 'Enter current password', auto: 'current-password' },
+            { label: 'New Password', value: next, set: setNext, ph: 'Enter new password', auto: 'new-password' },
+            { label: 'Confirm New Password', value: confirm, set: setConfirm, ph: 'Re-enter new password', auto: 'new-password' },
+          ].map((f, i) => (
+            <div key={i} className="space-y-2">
+              <label className="text-xs font-bold text-zinc-400 uppercase tracking-wider ml-1">{f.label}</label>
+              <div className="relative group">
+                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-600 group-focus-within:text-indigo-500 transition" />
+                <input
+                  type={inputType}
+                  value={f.value}
+                  onChange={(e) => f.set(e.target.value)}
+                  autoComplete={f.auto}
+                  placeholder={f.ph}
+                  className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-11 pr-12 py-3.5 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition"
+                />
+                {i === 0 && (
+                  <button type="button" onClick={() => setShow(!show)} className="absolute right-3 top-1/2 -translate-y-1/2 p-2 text-zinc-500 hover:text-white">
+                    {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+
+          {msg && (
+            <div className={cn(
+              "text-sm font-semibold rounded-xl px-4 py-3 border",
+              msg.type === 'ok'
+                ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/20'
+                : 'text-rose-300 bg-rose-500/10 border-rose-500/20'
+            )}>
+              {msg.text}
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={saving || !current || !next || !confirm}
+            className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white py-3.5 rounded-2xl font-bold transition shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2"
+          >
+            {saving ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Save className="w-5 h-5" />}
+            Update Password
+          </button>
+
+          <p className="text-[11px] text-zinc-600 text-center">
+            Your password is stored securely on this device. The default password is <span className="text-zinc-400 font-mono">joshbond</span>.
+          </p>
+        </form>
+      </div>
     </div>
   );
 };
@@ -1325,6 +1487,7 @@ const Settings = () => {
     { id: 'cerebras', label: 'Cerebras AI', icon: Video },
     { id: 'imgbb', label: 'ImgBB', icon: ImageIcon },
     { id: 'ads', label: 'Ads Settings', icon: Layout },
+    { id: 'password', label: 'Login Password', icon: Lock },
   ];
 
   if (loading) return (
@@ -2224,6 +2387,8 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
               </div>
             )}
 
+            {activeSubTab === 'password' && <PasswordSettings />}
+
             {activeSubTab === 'ads' && (
               <div className="space-y-8">
                 <div>
@@ -2323,9 +2488,14 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
   );
 };
 
-export default function App() {
+function Dashboard_App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const handleLogout = () => {
+    setAuthed(false);
+    navigate('/');
+  };
 
   return (
     <div className="min-h-screen bg-black text-zinc-100 font-sans selection:bg-indigo-500/30">
@@ -2334,6 +2504,7 @@ export default function App() {
         setActiveTab={setActiveTab} 
         isOpen={sidebarOpen} 
         onClose={() => setSidebarOpen(false)} 
+        onLogout={handleLogout}
       />
       
       <main className="lg:pl-64 min-h-screen flex flex-col">
@@ -2366,10 +2537,60 @@ export default function App() {
             {activeTab === 'blogger' && <BloggerAccounts />}
             {activeTab === 'blog-scheduler' && <Scheduler type="blog" />}
             {activeTab === 'video-scheduler' && <Scheduler type="video" />}
+            {activeTab === 'app-verification' && <AppVerification />}
             {activeTab === 'settings' && <Settings />}
           </motion.div>
         </AnimatePresence>
       </main>
     </div>
   );
+}
+
+export default function App() {
+  const path = usePathname();
+  const [authed, setAuthedState] = useState<boolean>(() => isAuthed());
+
+  // Sync auth state when path changes (e.g. logout)
+  useEffect(() => {
+    setAuthedState(isAuthed());
+  }, [path]);
+
+  const handleLogin = (password: string): boolean => {
+    if (password === getStoredPassword()) {
+      setAuthed(true);
+      setAuthedState(true);
+      navigate('/dashboard');
+      return true;
+    }
+    return false;
+  };
+
+  // Public routes (always accessible)
+  if (path === '/about') return <AboutPage />;
+  if (path === '/privacy-policy') return <PrivacyPage />;
+  if (path === '/terms') return <TermsPage />;
+  if (path === '/contact') return <ContactPage />;
+  if (path === '/data-deletion') return <DataDeletionPage />;
+
+  // Root: if authed, send to dashboard; otherwise show login homepage
+  if (path === '/') {
+    if (authed) {
+      // Render homepage publicly even when logged in (verification requirement),
+      // but offer easy access to dashboard via the Sign In submission
+      return <HomePage onLogin={handleLogin} />;
+    }
+    return <HomePage onLogin={handleLogin} />;
+  }
+
+  // Protected app routes
+  if (!authed) {
+    // Redirect to login
+    if (typeof window !== 'undefined') {
+      window.history.replaceState({}, '', '/');
+      return <HomePage onLogin={handleLogin} />;
+    }
+    return <HomePage onLogin={handleLogin} />;
+  }
+
+  return <Dashboard_App />;
 }

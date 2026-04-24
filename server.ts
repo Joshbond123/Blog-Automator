@@ -54,7 +54,12 @@ async function startServer() {
     }
 
     for (const field of SECRET_SETTING_FIELDS) {
-      normalized[field] = decryptSecret(normalized[field]);
+      try {
+        normalized[field] = decryptSecret(normalized[field]);
+      } catch (err: any) {
+        console.warn(`[settings] Failed to decrypt '${field}' (likely encrypted with a previous key). Field cleared. Re-save it from Settings.`);
+        normalized[field] = "";
+      }
     }
     return normalized;
   };
@@ -252,6 +257,7 @@ async function startServer() {
       res.json(normalized);
     } catch (err: any) {
       // If not configured, return empty settings so user can configure
+      console.error("[/api/settings] read error:", err?.message || err, err?.stack);
       const cfg = getCurrentSupabaseConfig();
       res.json({
         cloudflare_configs: [],
@@ -368,12 +374,77 @@ async function startServer() {
   app.post("/api/facebook/verify-token", async (req, res) => {
     const { token } = req.body;
     try {
-      // In a real app, call FB Graph API
-      // For demo, we'll just return success if token is not empty
-      if (!token) throw new Error("Token is required");
-      res.json({ status: "valid" });
+      if (!token || typeof token !== "string" || !token.trim()) {
+        return res.status(400).json({ status: "invalid", error: "Token is required" });
+      }
+      const trimmed = token.trim();
+
+      // Real check: hit /me on the Graph API. Facebook returns a clear error
+      // (code 190 = OAuthException) when the token is expired/revoked/invalid.
+      const meResp = await fetch(
+        `https://graph.facebook.com/v20.0/me?fields=id,name,category&access_token=${encodeURIComponent(trimmed)}`,
+      );
+      const meData: any = await meResp.json().catch(() => ({}));
+
+      if (!meResp.ok || meData?.error) {
+        const fbErr = meData?.error || {};
+        const subcode = fbErr.error_subcode;
+        const code = fbErr.code;
+        const expired =
+          code === 190 &&
+          (subcode === 463 || subcode === 467 ||
+            /expired/i.test(String(fbErr.message || "")));
+        return res.status(200).json({
+          status: "invalid",
+          expired,
+          code,
+          subcode,
+          error: fbErr.message || `Facebook rejected the token (HTTP ${meResp.status})`,
+        });
+      }
+
+      // Token works. Also probe /debug_token for richer metadata (expiry,
+      // scopes, type). Failure here is non-fatal — we still report "valid".
+      let debug: any = null;
+      try {
+        const dbg = await fetch(
+          `https://graph.facebook.com/v20.0/debug_token?input_token=${encodeURIComponent(trimmed)}&access_token=${encodeURIComponent(trimmed)}`,
+        );
+        const dbgJson: any = await dbg.json().catch(() => ({}));
+        if (dbg.ok && dbgJson?.data) {
+          const d = dbgJson.data;
+          const expiresAtSec = Number(d.expires_at || 0);
+          debug = {
+            app_id: d.app_id,
+            type: d.type,
+            is_valid: d.is_valid !== false,
+            scopes: Array.isArray(d.scopes) ? d.scopes : undefined,
+            expires_at: expiresAtSec ? new Date(expiresAtSec * 1000).toISOString() : null,
+            expires_in_seconds: expiresAtSec ? Math.max(0, expiresAtSec - Math.floor(Date.now() / 1000)) : null,
+            never_expires: expiresAtSec === 0,
+          };
+          if (debug.is_valid === false) {
+            return res.status(200).json({
+              status: "invalid",
+              expired: /expired/i.test(String(d.error?.message || "")),
+              error: d.error?.message || "Token is no longer valid",
+              debug,
+            });
+          }
+        }
+      } catch {
+        // ignore — /me success is authoritative
+      }
+
+      return res.json({
+        status: "valid",
+        id: meData.id,
+        name: meData.name,
+        category: meData.category,
+        debug,
+      });
     } catch (err: any) {
-      res.status(400).json({ error: err.message });
+      return res.status(500).json({ status: "invalid", error: err?.message || "Verification failed" });
     }
   });
 
@@ -485,7 +556,62 @@ async function startServer() {
       const supabase = getSupabase();
       const { data, error } = await supabase.from("facebook_pages").select("*");
       if (error) return res.status(500).json({ error: error.message });
-      res.json(data);
+
+      // Live re-validate every page's access_token against the Graph API so the
+      // dashboard reflects the REAL state (not the value that was stored when
+      // the page was first connected). Token-expiry detection uses Facebook's
+      // own error code 190 / subcodes 463 (expired) and 467 (invalid).
+      const pages = Array.isArray(data) ? data : [];
+      const checked = await Promise.all(
+        pages.map(async (page: any) => {
+          const tok = String(page?.access_token || "").trim();
+          if (!tok) return { ...page, status: "invalid", token_error: "Missing access token" };
+          try {
+            const r = await fetch(
+              `https://graph.facebook.com/v20.0/me?fields=id&access_token=${encodeURIComponent(tok)}`,
+              { signal: AbortSignal.timeout(8000) },
+            );
+            const j: any = await r.json().catch(() => ({}));
+            if (r.ok && !j?.error) {
+              return { ...page, status: "valid", token_error: null };
+            }
+            const fbErr = j?.error || {};
+            const expired =
+              fbErr.code === 190 &&
+              (fbErr.error_subcode === 463 ||
+                fbErr.error_subcode === 467 ||
+                /expired/i.test(String(fbErr.message || "")));
+            return {
+              ...page,
+              status: "invalid",
+              token_expired: expired,
+              token_error: fbErr.message || `Graph API rejected the token (HTTP ${r.status})`,
+            };
+          } catch (err: any) {
+            // Network/timeout — surface as "unknown" so the UI can show a real warning.
+            return {
+              ...page,
+              status: "unknown",
+              token_error: err?.message || "Token check timed out",
+            };
+          }
+        }),
+      );
+
+      // Best-effort: persist newly-detected status changes back to Supabase so
+      // other consumers (cron, video pipeline) see the correct state too.
+      for (const p of checked) {
+        const original = pages.find((o: any) => o.id === p.id);
+        if (original && original.status !== p.status && p.status !== "unknown") {
+          supabase
+            .from("facebook_pages")
+            .update({ status: p.status })
+            .eq("id", p.id)
+            .then(() => undefined, () => undefined);
+        }
+      }
+
+      res.json(checked);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -802,31 +928,110 @@ async function startServer() {
     });
   }
 
-  // Cron Job (runs every minute to check schedules)
+  // ── Scheduler tick (every minute) ────────────────────────────────────────
+  // For each enabled schedule, compute today's due moment in the schedule's
+  // timezone. If now >= due and we haven't already run for today's due,
+  // trigger the automation and stamp metadata.last_run_at for idempotency
+  // and missed-run catch-up (fires on next tick if the server was down).
+  function getNowInTimeZone(timeZone: string): { y: number; m: number; d: number; h: number; min: number } {
+    try {
+      const fmt = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+      const parts = fmt.formatToParts(new Date());
+      const get = (t: string) => Number(parts.find((p) => p.type === t)?.value || 0);
+      let h = get("hour");
+      if (h === 24) h = 0; // some runtimes emit 24
+      return { y: get("year"), m: get("month"), d: get("day"), h, min: get("minute") };
+    } catch {
+      const d = new Date();
+      return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), min: d.getUTCMinutes() };
+    }
+  }
+
+  // Returns the absolute UTC timestamp (ms) for "today HH:MM in tz".
+  function dueMsForTodayInTz(hh: number, mm: number, tz: string): number {
+    const n = getNowInTimeZone(tz);
+    const guessUtc = Date.UTC(n.y, n.m - 1, n.d, hh, mm, 0);
+    const lp = new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
+    }).formatToParts(new Date(guessUtc));
+    const get = (t: string) => Number(lp.find((p) => p.type === t)?.value || 0);
+    let lh = get("hour"); if (lh === 24) lh = 0;
+    const offsetMin = (lh * 60 + get("minute")) - (hh * 60 + mm);
+    return guessUtc - offsetMin * 60_000;
+  }
+
   cron.schedule("* * * * *", async () => {
     try {
-      const now = new Date();
-      const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      
       const supabase = getSupabase();
-      const { data: schedules } = await supabase
+      const { data: schedules, error } = await supabase
         .from("schedules")
         .select("*")
-        .eq("is_enabled", true)
-        .like("schedule_time", `${currentTime}%`);
+        .eq("is_enabled", true);
+      if (error) {
+        console.error("[scheduler] failed to load schedules:", error.message);
+        return;
+      }
+      if (!schedules || schedules.length === 0) return;
 
-      if (schedules) {
-        for (const schedule of schedules) {
-          console.log(`Triggering schedule ${schedule.id} at ${currentTime}`);
-          if (schedule.channel === "blog") {
-            runBlogAutomation(schedule.id).catch(console.error);
-          } else {
-            runVideoAutomation(schedule.id).catch(console.error);
+      const nowMs = Date.now();
+      for (const schedule of schedules) {
+        try {
+          const tz = String(schedule.timezone || "UTC").trim() || "UTC";
+          const raw = String(schedule.schedule_time || "").trim();
+          const m = raw.match(/^(\d{1,2}):(\d{2})/);
+          if (!m) {
+            console.warn(`[scheduler] schedule ${schedule.id} has invalid schedule_time="${raw}", skipping`);
+            continue;
           }
+          const hh = Math.min(23, Math.max(0, parseInt(m[1], 10)));
+          const mm = Math.min(59, Math.max(0, parseInt(m[2], 10)));
+          const dueMs = dueMsForTodayInTz(hh, mm, tz);
+
+          if (nowMs < dueMs) continue; // not yet due today
+
+          // Idempotency: have we already run for today's due moment?
+          const meta = (schedule.metadata && typeof schedule.metadata === "object") ? schedule.metadata : {};
+          const lastRunMs = meta.last_run_at ? Date.parse(String(meta.last_run_at)) : 0;
+          if (Number.isFinite(lastRunMs) && lastRunMs >= dueMs) continue;
+
+          // Don't catch up older than 24h (avoid surprise floods after long downtime)
+          if (nowMs - dueMs > 24 * 60 * 60 * 1000) continue;
+
+          // Stamp last_run_at FIRST to prevent duplicate fires from overlapping ticks.
+          const stampMeta = { ...meta, last_run_at: new Date(nowMs).toISOString(), last_due_at: new Date(dueMs).toISOString() };
+          const { error: stampErr } = await supabase
+            .from("schedules")
+            .update({ metadata: stampMeta })
+            .eq("id", schedule.id);
+          if (stampErr) {
+            console.error(`[scheduler] failed to stamp ${schedule.id}: ${stampErr.message}`);
+            continue;
+          }
+
+          const ageSec = Math.round((nowMs - dueMs) / 1000);
+          console.log(`[scheduler] Triggering ${schedule.channel} schedule ${schedule.id} (due ${hh}:${String(mm).padStart(2,"0")} ${tz}, age ${ageSec}s)`);
+          if (schedule.channel === "blog") {
+            runBlogAutomation(schedule.id).catch((e) => console.error(`[scheduler] blog run ${schedule.id} crashed:`, e?.message || e));
+          } else if (schedule.channel === "video") {
+            runVideoAutomation(schedule.id).catch((e) => console.error(`[scheduler] video run ${schedule.id} crashed:`, e?.message || e));
+          } else {
+            console.warn(`[scheduler] schedule ${schedule.id} has unknown channel="${schedule.channel}", skipping`);
+          }
+        } catch (innerErr: any) {
+          console.error(`[scheduler] error processing schedule ${schedule.id}:`, innerErr?.message || innerErr);
         }
       }
-    } catch (err) {
-      console.error("Cron job failed:", err);
+    } catch (err: any) {
+      console.error("[scheduler] tick failed:", err?.message || err);
     }
   });
 

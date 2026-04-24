@@ -1256,21 +1256,77 @@ async function topicShield_isUnique(candidate: string, history: string[], niche:
 }
 
 /**
- * Load the 100 most recent topics for this niche from the topics table.
- * This is the TopicShield-100 memory.
+ * Load the most recent historical titles for the TopicShield memory.
+ *
+ * IMPORTANT: We intentionally do NOT filter by niche here.
+ *   - Niche labels can drift (renames, new accounts, slight spelling differences).
+ *   - The same trending news/topic is the same regardless of which niche label
+ *     it was filed under, and we never want to re-publish it.
+ *
+ * We merge two sources so the shield uses the actual publish history as the
+ * source of truth (the `topics` table can be missing rows whenever a topic
+ * insert silently failed during a prior run):
+ *   1. `topics.topic`           — explicit shield records
+ *   2. `posts.title`            — every post we ever attempted/published
+ *
+ * Failed posts (title === "Failed to generate post") are skipped so they don't
+ * pollute the corpus.
  */
-async function topicShield_loadHistory(supabase: any, niche: string): Promise<string[]> {
-  const { data, error } = await supabase
-    .from('topics')
-    .select('topic, created_at')
-    .eq('niche', niche)
-    .order('created_at', { ascending: false })
-    .limit(TOPICSHIELD_HISTORY_CAP);
-  if (error) {
-    console.warn('[TopicShield] Failed to load history:', error.message);
-    return [];
+async function topicShield_loadHistory(supabase: any, _niche: string): Promise<string[]> {
+  const cap = TOPICSHIELD_HISTORY_CAP;
+  const seen = new Set<string>();
+  const merged: { text: string; ts: number }[] = [];
+
+  const pushUnique = (text: string, ts: number) => {
+    const t = String(text || '').trim();
+    if (!t) return;
+    const key = t.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push({ text: t, ts: Number.isFinite(ts) ? ts : 0 });
+  };
+
+  // 1) topics table — explicit shield memory across ALL niches
+  try {
+    const { data, error } = await supabase
+      .from('topics')
+      .select('topic, created_at')
+      .order('created_at', { ascending: false })
+      .limit(cap);
+    if (error) {
+      console.warn('[TopicShield] Failed to load topics history:', error.message);
+    } else {
+      for (const row of data || []) {
+        pushUnique(row.topic, Date.parse(row.created_at || '') || 0);
+      }
+    }
+  } catch (e: any) {
+    console.warn('[TopicShield] topics load threw:', e?.message || e);
   }
-  return (data || []).map((row: any) => String(row.topic || '').trim()).filter(Boolean);
+
+  // 2) posts table — actual publish history (real source of truth)
+  try {
+    const { data, error } = await supabase
+      .from('posts')
+      .select('title, published_at')
+      .order('published_at', { ascending: false })
+      .limit(cap);
+    if (error) {
+      console.warn('[TopicShield] Failed to load posts history:', error.message);
+    } else {
+      for (const row of data || []) {
+        const title = String(row.title || '').trim();
+        if (!title || title.toLowerCase() === 'failed to generate post') continue;
+        pushUnique(title, Date.parse(row.published_at || '') || 0);
+      }
+    }
+  } catch (e: any) {
+    console.warn('[TopicShield] posts load threw:', e?.message || e);
+  }
+
+  // Sort newest first and cap.
+  merged.sort((a, b) => b.ts - a.ts);
+  return merged.slice(0, cap).map(r => r.text);
 }
 
 function buildTrendingQueriesForNiche(niche: string) {
@@ -1501,49 +1557,182 @@ Topic: ${topic}`,
   return title;
 }
 
-function deterministicTopicHashtags(topic: string) {
-  const entities = extractTopicEntities(topic)
-    .map((entry) => `#${entry.replace(/[^A-Za-z0-9]+/g, '')}`)
-    .filter((entry) => entry.length > 3);
-  const keywords = extractTopicKeywords(topic)
-    .map((entry) => `#${entry.split(/[^a-z0-9]+/i).filter(Boolean).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join('')}`)
-    .filter((entry) => entry.length > 3);
-  const viralized = [
-    ...entities,
-    ...keywords,
-    ...keywords.map((entry) => `${entry}Alert`),
-    ...keywords.map((entry) => `${entry}Watch`),
-    ...entities.map((entry) => `${entry}Mystery`),
-  ];
+// ── Hashtag system ─────────────────────────────────────────────────────────
+// Goal: short, viral, topic-relevant hashtags only. Each tag is a single
+// short token (≤ 12 chars after the #), never a long joined CamelCase phrase.
+// Examples we WANT:  #Tech #AI #Viral #Tips #Facts #Trending #Food #Recipe
+// Examples we REJECT: #StoryBehindTheIce #DiscoveryAlertWatch #DeepDiveStory
 
-  const unique = Array.from(new Set(viralized.map((value) => value.replace(/#+/g, '#').replace(/[^#A-Za-z0-9]/g, ''))))
-    .filter((value) => /^#[A-Za-z0-9]{4,32}$/.test(value));
+const NICHE_VIRAL_TAG_BANK: Record<string, string[]> = {
+  'Scary / Mysterious / True Crime': ['#Mystery', '#Crime', '#Scary', '#True', '#Creepy', '#Cold', '#Spooky'],
+  'AI Tools & Technology':           ['#AI',      '#Tech',  '#Tools', '#Apps', '#Future', '#GPT',   '#Code'],
+  'Life Hacks & Tips':               ['#Hacks',   '#Tips',  '#Smart', '#DIY',  '#Pro',    '#Easy',  '#Daily'],
+  'Weird Facts & Discoveries':       ['#Facts',   '#Weird', '#Wow',   '#Wild', '#True',   '#Crazy', '#Discover'],
+  'Viral Entertainment':             ['#Viral',   '#Trend', '#Fun',   '#Wow',  '#Hot',    '#Buzz',  '#Watch'],
+  'Health & Wellness Hacks':         ['#Health',  '#Wellness', '#Fit', '#Tips', '#Glow',  '#Care',  '#Daily'],
+};
+const GENERIC_VIRAL_TAGS = ['#Viral', '#Trending', '#Wow', '#Hot', '#Daily', '#Story', '#Watch'];
 
-  return unique.slice(0, 5);
+// Known acronyms that must keep their original ALL-CAPS form (#AI not #Ai).
+const ACRONYM_TAGS = new Set(['AI', 'GPT', 'DIY', 'NFT', 'VR', 'AR', 'IT', 'UFO', 'FBI', 'CIA', 'USA', 'NYC', 'CEO', 'API', 'ML']);
+
+// Stopwords we never want as standalone hashtags (filtered when splitting joined tags).
+const HASHTAG_STOPWORDS = new Set([
+  'the','and','for','with','from','about','this','that','what','when','why',
+  'how','was','were','are','has','have','had','will','can','your','you',
+  'they','their','them','our','off','out','too','any','all','some','more',
+  'into','onto','upon','over','under','than','then','also','very','just',
+  'new','old','one','two','here','there','who','its','it','to','of','in',
+  'on','at','as','by','an','a','is','be','do','or','if','but','not','no',
+  'so','up','my','me','we','us','i','behind','during','after','before',
+]);
+
+// Strict validator: hashtag must be a single short token, ≤12 chars after #,
+// no more than one internal capital — UNLESS it's a known all-caps acronym
+// (so #WeirdFacts and #AI are OK, but #StoryBehindTheIce is rejected).
+function isShortViralTag(tag: string): boolean {
+  if (!/^#[A-Za-z][A-Za-z0-9]{1,11}$/.test(tag)) return false; // 2-12 chars after #
+  if (/^#\d+$/.test(tag)) return false;
+  const body = tag.slice(1);
+  if (ACRONYM_TAGS.has(body.toUpperCase()) && body === body.toUpperCase()) return true;
+  const internalUpper = (body.slice(1).match(/[A-Z]/g) || []).length;
+  return internalUpper <= 1;
+}
+
+// Take a free-form word and turn it into a clean short hashtag, or null.
+// Preserves known acronyms (#AI, #GPT) and existing valid 2-word CamelCase (#WeirdFacts).
+function toShortTag(word: string): string | null {
+  const cleaned = String(word || '')
+    .replace(/^#+/, '')
+    .replace(/[^A-Za-z0-9]/g, '')
+    .trim();
+  if (!cleaned) return null;
+
+  // 1) Known acronym → force ALL CAPS form
+  if (ACRONYM_TAGS.has(cleaned.toUpperCase())) {
+    const tag = `#${cleaned.toUpperCase()}`;
+    return isShortViralTag(tag) ? tag : null;
+  }
+
+  // 2) Already-valid TitleCase / CamelCase tag (e.g. WeirdFacts, Facts) → preserve case
+  //    BUT only if the first letter is already uppercase. Lowercase input falls through.
+  if (/^[A-Z]/.test(cleaned)) {
+    const asIs = `#${cleaned}`;
+    if (isShortViralTag(asIs)) {
+      if (HASHTAG_STOPWORDS.has(cleaned.toLowerCase())) return null;
+      return asIs;
+    }
+  }
+
+  // 3) Otherwise normalize to TitleCase single word: #Facts (not #FACTS, not #facts)
+  const cap = cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();
+  if (HASHTAG_STOPWORDS.has(cap.toLowerCase())) return null;
+  const tag = `#${cap}`;
+  return isShortViralTag(tag) ? tag : null;
+}
+
+function nicheTagBank(niche: string): string[] {
+  return NICHE_VIRAL_TAG_BANK[niche] || GENERIC_VIRAL_TAGS;
+}
+
+// Single source of truth. Always returns exactly `count` short, unique,
+// viral, topic/niche-relevant hashtags. Used for both blog and video paths.
+function sanitizeHashtags(rawCandidates: string[], topic: string, niche: string, count = 5): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const push = (tag: string | null) => {
+    if (!tag) return;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(tag);
+  };
+
+  // 1) Anything the LLM gave us, after splitting joined CamelCase tags into pieces
+  for (const raw of rawCandidates || []) {
+    if (out.length >= count) break;
+    const noHash = String(raw || '').replace(/^#+/, '').trim();
+    if (!noHash) continue;
+    // Try the whole token first
+    const whole = toShortTag(noHash);
+    if (whole) {
+      push(whole);
+      continue;
+    }
+    // Otherwise split on CamelCase / non-alphanumeric and take the strongest single-word pieces
+    const pieces = noHash
+      .replace(/([a-z])([A-Z])/g, '$1 $2')
+      .split(/[^A-Za-z0-9]+/)
+      .filter(Boolean);
+    for (const piece of pieces) {
+      if (out.length >= count) break;
+      push(toShortTag(piece));
+    }
+  }
+
+  // 2) Topic keywords (each word becomes its own short tag)
+  if (out.length < count) {
+    for (const kw of extractTopicKeywords(topic)) {
+      if (out.length >= count) break;
+      push(toShortTag(kw));
+    }
+  }
+
+  // 3) Niche viral bank
+  if (out.length < count) {
+    for (const tag of nicheTagBank(niche)) {
+      if (out.length >= count) break;
+      push(tag);
+    }
+  }
+
+  // 4) Generic viral tags as last resort
+  if (out.length < count) {
+    for (const tag of GENERIC_VIRAL_TAGS) {
+      if (out.length >= count) break;
+      push(tag);
+    }
+  }
+
+  return out.slice(0, count);
+}
+
+// Public deterministic helper kept for callers that want a no-LLM fallback.
+function deterministicTopicHashtags(topic: string, niche = '') {
+  return sanitizeHashtags([], topic, niche, 5);
 }
 
 async function generateViralHashtags(topic: string, niche: string, content: string) {
-  const deterministic = deterministicTopicHashtags(topic);
+  const examples =
+    nicheTagBank(niche).slice(0, 4).join(' ') +
+    '   (other good examples: #Tech #AI #Viral #Tips • #Facts #Trending #Learn • #Food #Yummy #Recipe)';
   try {
     const response = await generateText(
       [
         `Topic: ${topic}`,
-        `Niche context: ${niche}`,
-        `Article preview: ${stripHtml(content).slice(0, 500)}`,
-        'Generate exactly 5 viral-style hashtags for this blog post.',
-        'Rules: output only hashtags, no numbering, no commentary, no generic tags like #Viral or #Trending unless they are topic-specific.',
+        `Niche: ${niche}`,
+        `Article preview: ${stripHtml(content).slice(0, 400)}`,
+        '',
+        'Generate exactly 5 SHORT viral hashtags for this post.',
+        'STRICT RULES (mandatory):',
+        '- Each hashtag is ONE short word, max 12 letters after the #.',
+        '- NEVER join multiple words into one tag (no #StoryBehindTheIce, no #DeepDiveStory, no #DiscoveryAlertWatch).',
+        '- Prefer single common words people actually search.',
+        '- Mix topic-specific tags with niche-relevant viral tags.',
+        '- No spam, no repeats, no emojis, no numbers-only tags.',
+        '- Output ONLY the 5 hashtags separated by spaces. No commentary, no numbering.',
+        '',
+        `Style examples for this niche: ${examples}`,
       ].join('\n'),
       niche,
     );
-    const parsed = Array.from(new Set((String(response || '').match(/#[A-Za-z0-9]+/g) || []).map((value) => value.trim())));
-    if (parsed.length === 5) return parsed;
+    const parsed = Array.from(
+      new Set((String(response || '').match(/#[A-Za-z0-9]+/g) || []).map((v) => v.trim())),
+    );
+    return sanitizeHashtags(parsed, topic, niche, 5);
   } catch {
-    // fall back to deterministic hashtags
+    return sanitizeHashtags([], topic, niche, 5);
   }
-
-  if (deterministic.length >= 5) return deterministic.slice(0, 5);
-  const filler = ['#DeepDiveStory', '#ScienceWatch', '#StoryBehindTheIce', '#DiscoveryAlert', '#GlobalSignals'];
-  return Array.from(new Set([...deterministic, ...filler])).slice(0, 5);
 }
 
 function injectHashtagBlock(content: string, hashtags: string[]) {
@@ -1750,40 +1939,145 @@ async function uploadBufferToGithub(repo: string, token: string, buffer: Buffer,
 }
 
 // Upsert (create or update) a file in GitHub — handles SHA automatically for updates.
+// Retries on 409 (Conflict) and 422 (Unprocessable Entity / SHA mismatch) which both
+// happen when two concurrent runs target the same file path: between our SHA fetch
+// and our PUT, another writer updated the file, so our SHA is now stale. We refetch
+// and retry. This is a real production scenario when blog + video automations or
+// parallel video runs both sync render-pipeline files at the same time.
 async function upsertFileToGithub(repo: string, token: string, buffer: Buffer, path: string, message: string) {
   const { owner, name } = parseGithubRepo(repo);
   const encodedPath = path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
   const apiUrl = `https://api.github.com/repos/${owner}/${name}/contents/${encodedPath}`;
 
-  // Fetch current file SHA (needed to update an existing file)
-  let sha: string | undefined;
-  try {
-    const existing = await axios.get(apiUrl, outboundConfig({ headers: githubHeaders(token), timeout: 15000 }));
-    sha = String(existing.data?.sha || '').trim() || undefined;
-  } catch (e: any) {
-    if (e?.response?.status !== 404) throw e; // 404 = file doesn't exist yet, that's fine
+  const fetchSha = async (): Promise<string | undefined> => {
+    try {
+      const existing = await axios.get(apiUrl, outboundConfig({ headers: githubHeaders(token), timeout: 15000 }));
+      const s = String(existing.data?.sha || '').trim();
+      return s || undefined;
+    } catch (e: any) {
+      if (e?.response?.status === 404) return undefined; // file doesn't exist yet
+      throw e;
+    }
+  };
+
+  const MAX_ATTEMPTS = 5;
+  let lastErr: any;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const sha = await fetchSha();
+    const body: any = { message, content: buffer.toString('base64') };
+    if (sha) body.sha = sha;
+    try {
+      const res = await axios.put(apiUrl, body, outboundConfig({ headers: githubHeaders(token), timeout: 30000 }));
+      if (attempt > 1) {
+        console.log(`[github] Upserted ${path} (${(buffer.length / 1024).toFixed(0)}KB)${sha ? ' [updated]' : ' [created]'} on attempt ${attempt}`);
+      } else {
+        console.log(`[github] Upserted ${path} (${(buffer.length / 1024).toFixed(0)}KB)${sha ? ' [updated]' : ' [created]'}`);
+      }
+      return String(res.data?.content?.download_url || '').trim();
+    } catch (e: any) {
+      lastErr = e;
+      const status = e?.response?.status;
+      // 409 Conflict and 422 (often "sha didn't match") = stale SHA from a concurrent writer.
+      // Refetch SHA and retry with exponential-ish backoff + jitter.
+      if (status === 409 || status === 422) {
+        const delayMs = Math.min(8000, 400 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
+        console.warn(`[github] ${path} SHA conflict (status ${status}) on attempt ${attempt}/${MAX_ATTEMPTS}; retrying in ${delayMs}ms`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw e;
+    }
   }
-
-  const body: any = { message, content: buffer.toString('base64') };
-  if (sha) body.sha = sha;
-
-  const res = await axios.put(apiUrl, body, outboundConfig({ headers: githubHeaders(token), timeout: 30000 }));
-  console.log(`[github] Upserted ${path} (${(buffer.length / 1024).toFixed(0)}KB)${sha ? ' [updated]' : ' [created]'}`);
-  return String(res.data?.content?.download_url || '').trim();
+  throw lastErr || new Error(`[github] upsert ${path} failed after ${MAX_ATTEMPTS} attempts`);
 }
 
-// Sync the local render-video.mjs to the GitHub repo so GitHub Actions always uses the latest version.
+// Sync the local render scripts AND the entire Remotion project to the GitHub
+// repo so the "Video Renderer" GitHub Action always uses the latest version.
 async function syncRenderScriptToGithub(repo: string, token: string) {
+  const path = await import('path');
+  const fs = await import('fs');
+
+  // Files (and whole directories) that the GitHub Action depends on.
+  const FILE_TARGETS = [
+    'scripts/render-video.mjs',
+    '.github/workflows/render-video.yml',
+  ];
+  const DIR_TARGETS = ['remotion'];
+  // Ignore patterns for directory walks (don't ship build output / deps).
+  const IGNORED = new Set(['node_modules', 'out', 'public', 'dist', '.cache']);
+
+  const walkDir = (root: string, base = root): string[] => {
+    const out: string[] = [];
+    if (!fs.existsSync(root)) return out;
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (IGNORED.has(entry.name) || entry.name.startsWith('.')) continue;
+      const full = path.join(root, entry.name);
+      if (entry.isDirectory()) {
+        out.push(...walkDir(full, base));
+      } else if (entry.isFile()) {
+        out.push(full);
+      }
+    }
+    return out;
+  };
+
+  const allFiles: string[] = [];
+  for (const f of FILE_TARGETS) {
+    if (fs.existsSync(path.join(process.cwd(), f))) allFiles.push(f);
+  }
+  for (const d of DIR_TARGETS) {
+    const abs = path.join(process.cwd(), d);
+    for (const full of walkDir(abs)) {
+      const rel = path.relative(process.cwd(), full).split(path.sep).join('/');
+      allFiles.push(rel);
+    }
+  }
+
+  let pushed = 0;
+  for (const rel of allFiles) {
+    try {
+      const buf = Buffer.from(fs.readFileSync(path.join(process.cwd(), rel)));
+      await upsertFileToGithub(
+        repo,
+        token,
+        buf,
+        rel,
+        `chore: sync ${rel} from automation platform`,
+      );
+      pushed++;
+    } catch (err: any) {
+      console.warn(`[video] Failed to sync ${rel}:`, err?.message || err);
+    }
+  }
+  console.log(`[video] Synced ${pushed}/${allFiles.length} render-pipeline files to GitHub ✓`);
+}
+
+// AI-generated viral CTA per video. Always includes the required phrases:
+// "check link in bio" and a like/share/follow ask.
+async function generateVideoCTA(topic: string, niche: string): Promise<string> {
+  const fallback = 'LIKE, SHARE & FOLLOW — CHECK LINK IN BIO!';
   try {
-    const path = await import('path');
-    const fs = await import('fs');
-    const scriptPath = path.join(process.cwd(), 'scripts', 'render-video.mjs');
-    const scriptBuffer = Buffer.from(fs.readFileSync(scriptPath));
-    await upsertFileToGithub(repo, token, scriptBuffer, 'scripts/render-video.mjs', 'chore: sync render-video.mjs from automation platform');
-    console.log('[video] render-video.mjs synced to GitHub ✓');
-  } catch (err: any) {
-    console.warn('[video] Failed to sync render-video.mjs to GitHub:', err?.message || err);
-    // Non-fatal — workflow will use whatever version is already in the repo
+    const raw = await generateText(
+      `Write ONE viral short-form-video CTA (call to action) for a video about "${topic}" in the ${niche} niche.
+
+REQUIREMENTS:
+- ALL CAPS
+- 8 to 14 words MAX (must fit on screen)
+- Punchy, urgent, emotional energy
+- MUST include the phrase "CHECK LINK IN BIO"
+- MUST also include a like/share/follow ask (e.g. "LIKE, SHARE & FOLLOW")
+- No hashtags, no quotes, no emojis
+Return ONLY the CTA text, nothing else.`,
+      niche,
+    );
+    let text = String(raw || '').trim().replace(/^["'`]+|["'`]+$/g, '').toUpperCase();
+    if (!/CHECK LINK IN BIO/.test(text)) text = `${text} — CHECK LINK IN BIO`;
+    if (!/(LIKE|SHARE|FOLLOW)/.test(text)) text = `LIKE, SHARE & FOLLOW — ${text}`;
+    // Hard cap so it always fits on screen
+    if (text.length > 90) text = text.slice(0, 87) + '...';
+    return text || fallback;
+  } catch {
+    return fallback;
   }
 }
 
@@ -2020,7 +2314,24 @@ export async function runBlogAutomation(scheduleId: string) {
       }
     }
 
-    await supabase.from('topics').insert({ niche, topic, created_at: new Date().toISOString() });
+    {
+      const normalized_topic = normalizeTopicText(topic) || topic.toLowerCase().trim();
+      const { error: topicInsertErr } = await supabase
+        .from('topics')
+        .insert({
+          niche,
+          topic,
+          normalized_topic,
+          source: 'automation',
+          used_for: bloggerPost.id || scheduleId,
+          created_at: new Date().toISOString(),
+        });
+      if (topicInsertErr) {
+        console.error(`[TopicShield] FAILED to save topic to history: ${topicInsertErr.message}. Future runs may produce duplicates.`);
+      } else {
+        console.log(`[TopicShield] Saved topic to history (niche="${niche}").`);
+      }
+    }
 
     if (account.facebook_page_id) {
       const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', account.facebook_page_id).single();
@@ -2032,13 +2343,37 @@ export async function runBlogAutomation(scheduleId: string) {
 
           console.log(`✓ Facebook post published: https://www.facebook.com/${fbPage.page_id}/posts/${fbPostId}`);
 
-          const blogComment = await generateBloggerComment(topic, niche, bloggerPost.url);
-          await axios.post(
-            `https://graph.facebook.com/v19.0/${fbPostId}/comments`,
-            { message: blogComment, access_token: fbPage.access_token },
-            outboundConfig({ timeout: 30000 }),
-          );
-          console.log(`✓ Facebook comment (AI-generated) posted on ${fbPostId}`);
+          // Post the link-bearing comment in its own try/catch + retry so a
+          // transient LLM or Graph API failure NEVER leaves the FB post
+          // without the blog link (the whole reason the comment exists).
+          const linkCommentAttempts: string[] = [];
+          try {
+            linkCommentAttempts.push(await generateBloggerComment(topic, niche, bloggerPost.url));
+          } catch {
+            linkCommentAttempts.push(`Read the full article here 👉 ${bloggerPost.url}`);
+          }
+          // Always queue a deterministic fallback as the second attempt.
+          linkCommentAttempts.push(`Read the full article here 👉 ${bloggerPost.url}`);
+
+          let commentPosted = false;
+          for (let i = 0; i < linkCommentAttempts.length && !commentPosted; i += 1) {
+            const message = linkCommentAttempts[i];
+            try {
+              await axios.post(
+                `https://graph.facebook.com/v19.0/${fbPostId}/comments`,
+                { message, access_token: fbPage.access_token },
+                outboundConfig({ timeout: 30000 }),
+              );
+              commentPosted = true;
+              console.log(`✓ Facebook link comment posted on ${fbPostId} (attempt ${i + 1}, contains URL: ${message.includes(bloggerPost.url)})`);
+            } catch (commentErr: any) {
+              const body = commentErr?.response?.data ? JSON.stringify(commentErr.response.data) : '';
+              console.warn(`[automation] FB comment attempt ${i + 1} failed: ${commentErr?.message || commentErr} ${body}`);
+            }
+          }
+          if (!commentPosted) {
+            console.error(`[automation] FB link comment FAILED for ${fbPostId} after ${linkCommentAttempts.length} attempts. Blog URL: ${bloggerPost.url}`);
+          }
         } catch (fbError: any) {
           const errBody = fbError?.response?.data ? JSON.stringify(fbError.response.data) : '';
           console.warn('[automation] Facebook cross-post warning:', fbError?.message || fbError, errBody);
@@ -2095,6 +2430,19 @@ export async function runBlogAutomation(scheduleId: string) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function generateBloggerComment(topic: string, niche: string, blogUrl: string): Promise<string> {
+  const fallback = `Fascinating topic! Read the full breakdown here 👉 ${blogUrl}`;
+  // Hard guarantee: the returned comment ALWAYS contains the blog URL,
+  // regardless of niche or what the LLM returns. This is what carries the
+  // click-through from Facebook back to the published Blogger article.
+  const ensureUrl = (text: string): string => {
+    let out = String(text || '').trim().slice(0, 500);
+    if (!out) return fallback;
+    if (blogUrl && !out.includes(blogUrl)) {
+      // Trim trailing punctuation/whitespace before appending so the URL renders cleanly.
+      out = `${out.replace(/[\s.,;:!?-]+$/, '')} 👉 ${blogUrl}`;
+    }
+    return out.slice(0, 600);
+  };
   try {
     const raw = await generateText(
       `You are a social media manager posting a comment on a Facebook post about "${topic}" in the ${niche} niche.
@@ -2103,16 +2451,16 @@ Write ONE short, highly engaging comment that:
 - Mentions something curious or surprising about the topic (1 sentence)
 - Teases what readers will find in the full article (1 sentence)
 - Ends with a direct call-to-action to click the link
-- Includes the article URL: ${blogUrl}
+- MUST include this exact article URL verbatim: ${blogUrl}
 - Sounds human, not robotic
 - Maximum 3 sentences total, no hashtags
 
 Return ONLY the comment text.`,
       niche,
     );
-    return String(raw || '').trim().slice(0, 500) || `Read the full article: ${blogUrl}`;
+    return ensureUrl(String(raw || ''));
   } catch {
-    return `Fascinating topic! Read the full breakdown here 👉 ${blogUrl}`;
+    return fallback;
   }
 }
 
@@ -2163,13 +2511,16 @@ interface VideoScript {
 
 async function generateVideoScript(topic: string, niche: string): Promise<VideoScript> {
   const raw = await generateText(
-    `You are a viral short-form video content creator. Create a complete video script for this topic: "${topic}"
+    `You are a viral short-form video content creator. Create a complete ~60-second video script for this topic: "${topic}"
 Niche: ${niche}
 
 REQUIREMENTS:
-- voiceover: 80-110 words of narration. Hook in first 5 words. Specific facts. Conversational energy. End with strong CTA ("Follow for more", "Share this", "Comment below").
+- voiceover: EXACTLY 135-150 words of natural spoken narration so it lands at ~55-60 seconds when read at a normal pace. NEVER fewer than 130 words and NEVER more than 155 words.
+  • Open with a 5-7 word HOOK that creates instant curiosity (no "Did you know", no "Have you ever").
+  • Deliver 3-4 specific, surprising facts in conversational TikTok/Reels energy.
+  • The LAST 12-18 words MUST be a spoken CTA that says (in your own natural words): like the video, share it with someone, follow the page, and visit the blog link in the bio for the full story / more posts. The CTA must sound human and energetic — not robotic.
 - scenes: exactly 5 scene descriptions. Each must be a DETAILED image generation prompt. Cinematic, realistic, NO TEXT, NO WORDS, NO SIGNS, NO LETTERS in the image.
-- hashtags: exactly 5 viral hashtags for this topic.
+- hashtags: exactly 5 SHORT viral hashtags. EACH tag is ONE short word (max 12 letters after the #). Never join multiple words into one tag. Examples of GOOD tags: #Tech #AI #Viral #Tips #Facts #Trending #Food #Recipe. Examples of BAD tags (forbidden): #StoryBehindTheIce #DiscoveryAlertWatch #DeepDiveStory.
 
 Return ONLY valid JSON, nothing else:
 {
@@ -2181,7 +2532,7 @@ Return ONLY valid JSON, nothing else:
     {"imagePrompt": "detailed scene 4 description"},
     {"imagePrompt": "detailed scene 5 description"}
   ],
-  "hashtags": ["#tag1", "#tag2", "#tag3", "#tag4", "#tag5"]
+  "hashtags": ["#Tag1", "#Tag2", "#Tag3", "#Tag4", "#Tag5"]
 }`,
     niche,
   );
@@ -2198,10 +2549,11 @@ Return ONLY valid JSON, nothing else:
     throw new Error(`Video script missing required fields. Got: ${JSON.stringify(Object.keys(parsed || {}))}`);
   }
 
+  const rawHashtags = Array.isArray(parsed.hashtags) ? (parsed.hashtags as any[]).map((t) => String(t || '')) : [];
   return {
     voiceover: String(parsed.voiceover).trim(),
     scenes: (parsed.scenes as any[]).slice(0, 6).map((s: any) => ({ imagePrompt: String(s?.imagePrompt || s?.prompt || '').trim() })),
-    hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags.slice(0, 5) : [],
+    hashtags: sanitizeHashtags(rawHashtags, topic, niche, 5),
   };
 }
 
@@ -2284,6 +2636,8 @@ async function dispatchVideoRenderWorkflow(
   wordTimestamps: WordTimestamp[],
   title: string,
   correlationId: string,
+  cta: string,
+  hookText: string,
 ) {
   const { owner, name } = parseGithubRepo(repo);
   await axios.post(
@@ -2296,11 +2650,13 @@ async function dispatchVideoRenderWorkflow(
         wordTimestamps: JSON.stringify(wordTimestamps),
         title,
         correlationId,
+        cta,
+        hookText,
       },
     },
     outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
   );
-  console.log(`[video] Dispatched render_video workflow: ${correlationId}`);
+  console.log(`[video] Dispatched render_video workflow: ${correlationId} (engine=remotion, cta="${cta}")`);
 }
 
 async function waitForVideoRenderArtifact(repo: string, token: string, correlationId: string): Promise<{ videoBuffer: Buffer; result: any }> {
@@ -2400,24 +2756,77 @@ async function publishVideoToFacebook(pageId: string, accessToken: string, video
 }
 
 async function generateVideoEngagementComment(topic: string, niche: string, blogUrl?: string): Promise<string> {
+  const fallback = blogUrl
+    ? `Loved this one? Drop a 🔥 in the replies, share it with someone who needs to see it, and read the full breakdown here → ${blogUrl}`
+    : `Loved this one? Drop a 🔥 in the replies and share it with someone who needs to see it. Follow for daily stories like this!`;
   try {
-    const blogLine = blogUrl ? `\n- Optionally reference this blog post for further reading: ${blogUrl}` : '';
+    const blogLine = blogUrl
+      ? `\n- The comment MUST end by sharing this exact blog link for the full story: ${blogUrl}\n- Phrase the link naturally, e.g. "full story here →" or "read the deep dive →"`
+      : '';
     const raw = await generateText(
-      `You are a social media expert. Write ONE high-engagement comment for a Facebook video about "${topic}" in the ${niche} niche.
+      `You are a senior social-media community manager for a viral Facebook page in the "${niche}" niche.
+Write ONE pinned-comment-quality reply for a Facebook video about: "${topic}".
 
-The comment must:
-- Ask a provocative question that sparks replies
-- Be curious, enthusiastic, short (2-3 sentences)
-- Drive likes, shares, and comment replies
-- Feel human and conversational, NOT corporate${blogLine}
-- NO hashtags in the comment
+The comment MUST:
+- Sound 100% human — warm, witty, genuinely curious, NOT corporate, NOT a press release
+- Be 2-4 sentences, ~35-55 words
+- Open with a hooky line that reacts to the video (no "Hey guys", no "Check this out")
+- Ask ONE specific question that invites real replies (not generic "what do you think?")
+- Encourage viewers to LIKE, SHARE with a friend, and FOLLOW the page for more
+- Feel native to Facebook, not LinkedIn
+- Use AT MOST 1 tasteful emoji (or zero)
+- NO hashtags${blogLine}
 
-Return ONLY the comment text.`,
+Return ONLY the comment text — no quotes, no preamble.`,
       niche,
     );
-    return String(raw || '').trim().slice(0, 500);
+    let text = String(raw || '').trim().replace(/^["'`]+|["'`]+$/g, '');
+    if (blogUrl && !text.includes(blogUrl)) text = `${text} ${blogUrl}`;
+    return text.slice(0, 600) || fallback;
   } catch {
-    return `What do you think about this? Drop your thoughts below and share with a friend who needs to see this! 👇`;
+    return fallback;
+  }
+}
+
+async function generateFacebookVideoCaption(
+  topic: string,
+  niche: string,
+  hashtags: string[],
+  _blogUrl?: string,
+): Promise<string> {
+  const tagLine = (hashtags || []).filter(Boolean).slice(0, 4).join(' ').trim();
+  const fallback =
+    `${topic} 🤯\n\nLike, share & follow for more.` +
+    (tagLine ? `\n\n${tagLine}` : '');
+  try {
+    const raw = await generateText(
+      `You are the social-media editor of a top-performing Facebook page in the "${niche}" niche.
+Write ONE short, viral-style Facebook caption for a short vertical video titled: "${topic}".
+
+STRICT CAPTION RULES:
+- TOTAL length: 1 to 3 SHORT lines, max 35 words, max 220 characters.
+- Line 1: a punchy, scroll-stopping hook (no "You won't believe", no clickbait).
+- Optional line 2: one sentence of curiosity or value.
+- Final short line: friendly CTA asking viewers to LIKE, SHARE & FOLLOW.
+- Up to 1 tasteful emoji total (or zero) — never spammy.
+- Do NOT include any URL, link, "link in bio", or "full story" reference.
+- Do NOT include hashtags inside the body (they are appended separately).
+- No quotes around the whole caption, no preamble, no markdown, no labels.
+
+Return ONLY the caption text.`,
+      niche,
+    );
+    let body = String(raw || '').trim().replace(/^["'`]+|["'`]+$/g, '');
+    body = body.replace(/https?:\/\/\S+/gi, '').replace(/\blink in bio\b/gi, '').replace(/\bfull story\b[^\n]*/gi, '').trim();
+    const words = body.split(/\s+/);
+    if (words.length > 35) body = words.slice(0, 35).join(' ');
+    if (body.length > 220) body = body.slice(0, 220).replace(/\s+\S*$/, '');
+    if (tagLine && !body.includes(tagLine)) {
+      body = `${body}\n\n${tagLine}`;
+    }
+    return body || fallback;
+  } catch {
+    return fallback;
   }
 }
 
@@ -2479,9 +2888,53 @@ export async function runVideoAutomation(scheduleId: string) {
     const rawTopic = await pickUniqueTrendingTopic(supabase, niche);
     if (!rawTopic) throw new Error(`TopicShield could not find a unique topic for niche="${niche}"`);
 
-    // ── 4. Rewrite topic to viral headline
-    topic = await rewriteToViralTitle(rawTopic, niche);
-    console.log(`[video] Topic selected & rewritten: "${topic}"`);
+    // ── 4. Rewrite topic to viral headline + post-rewrite duplicate check
+    //
+    // CRITICAL: pickUniqueTrendingTopic only validated the RAW RSS title.
+    // Different raw RSS headlines can collapse to the same viral title once
+    // rewritten by the AI, producing duplicate videos. We must therefore
+    // re-validate the FINAL viral title against history before using it,
+    // mirroring runBlogAutomation's post-rewrite check.
+    const MAX_REWRITE_ATTEMPTS = 6;
+    let rewriteAttempt = 0;
+    let acceptedTopic = '';
+    let lastRejectedTopic = '';
+    while (rewriteAttempt < MAX_REWRITE_ATTEMPTS && !acceptedTopic) {
+      rewriteAttempt += 1;
+      const candidateTopic = await rewriteToViralTitle(rawTopic, niche);
+      const postRewriteHistory = await topicShield_loadHistory(supabase, niche);
+      const isUnique = await topicShield_isUnique(candidateTopic, postRewriteHistory, niche);
+      if (isUnique) {
+        acceptedTopic = candidateTopic;
+        break;
+      }
+      lastRejectedTopic = candidateTopic;
+      console.warn(
+        `[TopicShield] Post-rewrite duplicate on attempt ${rewriteAttempt}/${MAX_REWRITE_ATTEMPTS}: "${candidateTopic}" — retrying with a fresh trending topic.`,
+      );
+      // Pull a brand-new RSS candidate so the rewriter has different source material.
+      const freshRaw = await pickUniqueTrendingTopic(supabase, niche).catch(() => '');
+      if (freshRaw) {
+        // Tail-call style: re-bind the local rawTopic for the next loop iteration
+        // by reusing the variable through a retry of the rewrite step.
+        // (We can't reassign the const above, but rewriteToViralTitle accepts any source.)
+        const retryTopic = await rewriteToViralTitle(freshRaw, niche);
+        const retryHistory = await topicShield_loadHistory(supabase, niche);
+        if (await topicShield_isUnique(retryTopic, retryHistory, niche)) {
+          acceptedTopic = retryTopic;
+          break;
+        }
+        lastRejectedTopic = retryTopic;
+      }
+    }
+    if (!acceptedTopic) {
+      throw new Error(
+        `[TopicShield] Could not produce a unique viral title after ${MAX_REWRITE_ATTEMPTS} rewrite attempts. ` +
+          `Last rejected title: "${lastRejectedTopic}". Aborting to prevent duplicate publishing.`,
+      );
+    }
+    topic = acceptedTopic;
+    console.log(`[video] Topic selected & rewritten (unique-verified): "${topic}"`);
 
     // ── 5. Generate structured video script (voiceover + scenes + hashtags)
     console.log('[video] Generating video script...');
@@ -2518,24 +2971,30 @@ export async function runVideoAutomation(scheduleId: string) {
     console.log('[video] Syncing render script to GitHub...');
     await syncRenderScriptToGithub(githubRepo, githubPat);
     const correlationId = `video-${ts}-${Math.random().toString(36).slice(2, 8)}`;
-    await dispatchVideoRenderWorkflow(githubRepo, githubPat, voicePath, scenePaths, wordTimestamps, topic, correlationId);
+
+    // AI-generated viral CTA + short attention-grabbing hook for the first 2s
+    const ctaText = await generateVideoCTA(topic, niche);
+    const hookWords = voiceover.split(/\s+/).filter(Boolean).slice(0, 6).join(' ');
+    const hookText = (hookWords || topic).toUpperCase().slice(0, 60);
+
+    await dispatchVideoRenderWorkflow(
+      githubRepo,
+      githubPat,
+      voicePath,
+      scenePaths,
+      wordTimestamps,
+      topic,
+      correlationId,
+      ctaText,
+      hookText,
+    );
 
     // ── 10. Poll until video render completes and download artifact
     console.log(`[video] Waiting for render workflow to complete (correlationId=${correlationId})...`);
     const { videoBuffer, result: renderResult } = await waitForVideoRenderArtifact(githubRepo, githubPat, correlationId);
     console.log(`[video] Render complete: ${renderResult.videoDuration?.toFixed(1)}s video, ${renderResult.videoSizeMB}MB`);
 
-    // ── 11. Build Facebook post description
-    const hashtagStr = hashtags.join(' ');
-    const fbDescription = `${topic}\n\n${hashtagStr}`;
-
-    // ── 12. Post video to Facebook
-    console.log('[video] Uploading video to Facebook...');
-    const videoId = await publishVideoToFacebook(fbPage.page_id, fbPage.access_token, videoBuffer, fbDescription);
-    const fbVideoUrl = `https://www.facebook.com/${fbPage.page_id}/videos/${videoId}`;
-    console.log(`✓ Facebook video published: ${fbVideoUrl}`);
-
-    // ── 13. Look up linked blogger account for blog URL reference
+    // ── 11. Build a real, human-quality Facebook caption (with blog link + CTA)
     let blogUrl: string | undefined;
     try {
       const { data: blogAccount } = await supabase
@@ -2545,6 +3004,15 @@ export async function runVideoAutomation(scheduleId: string) {
         .single();
       blogUrl = blogAccount?.url;
     } catch { /* no linked blog, that's ok */ }
+
+    const fbDescription = await generateFacebookVideoCaption(topic, niche, hashtags, blogUrl);
+    console.log(`[video] Generated FB caption (${fbDescription.length} chars, viral-style, no link)`);
+
+    // ── 12. Post video to Facebook
+    console.log('[video] Uploading video to Facebook...');
+    const videoId = await publishVideoToFacebook(fbPage.page_id, fbPage.access_token, videoBuffer, fbDescription);
+    const fbVideoUrl = `https://www.facebook.com/${fbPage.page_id}/videos/${videoId}`;
+    console.log(`✓ Facebook video published: ${fbVideoUrl}`);
 
     // ── 14. Post AI-generated engagement comment on the video
     await sleep(8000);
@@ -2561,7 +3029,24 @@ export async function runVideoAutomation(scheduleId: string) {
     }
 
     // ── 15. Save topic to TopicShield history
-    await supabase.from('topics').insert({ niche, topic, created_at: new Date().toISOString() });
+    {
+      const normalized_topic = normalizeTopicText(topic) || topic.toLowerCase().trim();
+      const { error: topicInsertErr } = await supabase
+        .from('topics')
+        .insert({
+          niche,
+          topic,
+          normalized_topic,
+          source: 'automation',
+          used_for: jobId || scheduleId,
+          created_at: new Date().toISOString(),
+        });
+      if (topicInsertErr) {
+        console.error(`[TopicShield] FAILED to save topic to history: ${topicInsertErr.message}. Future runs may produce duplicates.`);
+      } else {
+        console.log(`[TopicShield] Saved topic to history (niche="${niche}").`);
+      }
+    }
 
     // ── 16. Log to video_jobs
     if (jobId) {
@@ -2579,8 +3064,10 @@ export async function runVideoAutomation(scheduleId: string) {
     console.log(`  Topic: ${topic}`);
     console.log(`  Facebook: ${fbVideoUrl}`);
   } catch (error: any) {
+    const fbErr = error?.response?.data;
     const errMsg = String(error?.message || error || 'unknown error');
-    console.error(`[video] FAILED for schedule ${scheduleId}:`, errMsg);
+    const detail = fbErr ? ` | response: ${JSON.stringify(fbErr).slice(0, 600)}` : '';
+    console.error(`[video] FAILED for schedule ${scheduleId}:`, errMsg + detail);
     if (jobId) {
       await supabase.from('video_jobs').update({ status: 'failed' }).eq('id', jobId);
     }
