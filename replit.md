@@ -73,3 +73,10 @@ Configured as autoscale deployment:
 - Secrets stored in Supabase are encrypted with AES-256-GCM using `APP_ENCRYPTION_KEY` or `SUPABASE_SERVICE_ROLE_KEY`
 - The cron scheduler checks for due schedules every minute and triggers blog or video automations
 - Cloudflare, Cerebras, and ElevenLabs API keys are rotated across multiple configured accounts
+- `upsertFileToGithub` retries on HTTP 409/422 (SHA conflicts from concurrent writes) — needed when blog and video runs sync render-pipeline files at the same time
+- Hashtag system (`sanitizeHashtags` in `automation.ts`) enforces SHORT, single-word, viral tags only. Each tag ≤ 12 chars after `#`, max one internal capital, known acronyms preserved (#AI, #GPT), stopwords filtered (#The, #Behind, etc.). Used by both blog and video paths via `generateViralHashtags()` and `generateVideoScript()`. Per-niche viral tag bank in `NICHE_VIRAL_TAG_BANK`.
+
+## Git / GitHub
+
+- Remote `origin` → https://github.com/Joshbond123/Blog-Automator (main branch)
+- The Replit workspace's local `.git` is gated by the platform; pushes from this workspace are done via the GitHub Git Data API (one commit per push) using a PAT. `.replit` and `replit.nix` are excluded from those pushes.
