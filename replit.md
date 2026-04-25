@@ -80,3 +80,13 @@ Configured as autoscale deployment:
 
 - Remote `origin` → https://github.com/Joshbond123/Blog-Automator (main branch)
 - The Replit workspace's local `.git` is gated by the platform; pushes from this workspace are done via the GitHub Git Data API (one commit per push) using a PAT. `.replit` and `replit.nix` are excluded from those pushes.
+
+## GitHub Actions Pipeline (CRITICAL)
+
+The render pipeline depends on TWO GitHub Actions workflow files that MUST exist on `main`:
+- `.github/workflows/title-overlay.yml` — listens for `repository_dispatch` event type `title_overlay`
+- `.github/workflows/render-video.yml` — listens for `repository_dispatch` event type `render_video`
+
+The matchers in `automation.ts` (`waitForOverlayArtifact`, `waitForVideoRenderArtifact`) require the run-name to contain the correlationId (`Title Overlay Renderer - <id>` and `Video Renderer - <id>`). If the YAML files are missing the dispatch silently has no listener and times out after 3 min with `Overlay/Video workflow run was not found.`
+
+These files were once accidentally deleted by stale-tree pushes (commits `bd6714b`, `07b2cb9`). They were restored on 2026-04-25 with commits `476c323` (overlay) and `0878590` (video). When pushing to GitHub from any local checkout, ALWAYS verify these two files are present in your tree — never push from a checkout that lacks them or they will be removed from `main` again.
