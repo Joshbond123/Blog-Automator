@@ -1928,14 +1928,37 @@ function githubHeaders(token: string) {
 async function uploadBufferToGithub(repo: string, token: string, buffer: Buffer, path: string, message: string) {
   const { owner, name } = parseGithubRepo(repo);
   const encodedPath = path.split('/').map((segment) => encodeURIComponent(segment)).join('/');
-  const res = await axios.put(
-    `https://api.github.com/repos/${owner}/${name}/contents/${encodedPath}`,
-    { message, content: buffer.toString('base64') },
-    outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
-  );
-  const url = String(res.data?.content?.download_url || '').trim();
-  if (!/^https?:\/\//.test(url)) throw new Error('GitHub upload did not return a public download URL.');
-  return url;
+  const apiUrl = `https://api.github.com/repos/${owner}/${name}/contents/${encodedPath}`;
+
+  // Paths here are timestamped (voice-${ts}.mp3, scene-${ts}.png, etc.) so a 409
+  // almost always means concurrent repo activity — not a true SHA mismatch on
+  // this file. Retry on 409/422 with exponential backoff to match upsertFileToGithub.
+  const MAX_ATTEMPTS = 5;
+  let lastErr: any;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const res = await axios.put(
+        apiUrl,
+        { message, content: buffer.toString('base64') },
+        outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
+      );
+      const url = String(res.data?.content?.download_url || '').trim();
+      if (!/^https?:\/\//.test(url)) throw new Error('GitHub upload did not return a public download URL.');
+      if (attempt > 1) console.log(`[github] Uploaded ${path} on attempt ${attempt}`);
+      return url;
+    } catch (e: any) {
+      lastErr = e;
+      const status = e?.response?.status;
+      if (status === 409 || status === 422) {
+        const delayMs = Math.min(8000, 400 * 2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
+        console.warn(`[github] uploadBuffer ${path} conflict (status ${status}) attempt ${attempt}/${MAX_ATTEMPTS}; retrying in ${delayMs}ms`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw lastErr || new Error(`[github] uploadBufferToGithub ${path} failed after ${MAX_ATTEMPTS} attempts`);
 }
 
 // Upsert (create or update) a file in GitHub — handles SHA automatically for updates.
