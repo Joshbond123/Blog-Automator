@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.cache/
+.env
+.env.local
+.env.*.local
+automation/incoming/
+automation/source/
+automation/final/
+automation/voiceovers/
+automation/scenes/
+automation/results/
+*.log
+.DS_Store
