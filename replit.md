@@ -75,6 +75,7 @@ Configured as autoscale deployment:
 - Cloudflare, Cerebras, and ElevenLabs API keys are rotated across multiple configured accounts
 - `upsertFileToGithub` retries on HTTP 409/422 (SHA conflicts from concurrent writes) — needed when blog and video runs sync render-pipeline files at the same time
 - Hashtag system (`sanitizeHashtags` in `automation.ts`) enforces SHORT, single-word, viral tags only. Each tag ≤ 12 chars after `#`, max one internal capital, known acronyms preserved (#AI, #GPT), stopwords filtered (#The, #Behind, etc.). Used by both blog and video paths via `generateViralHashtags()` and `generateVideoScript()`. Per-niche viral tag bank in `NICHE_VIRAL_TAG_BANK`.
+- Topic-duplicate handling (TopicShield) **never aborts a run** for duplicates. Both `runBlogAutomation` and `runVideoAutomation` use the unified `acquireUniqueViralTopic(supabase, niche, channel)` helper in `automation.ts` (~line 1521). The helper iterates all 100 trending candidates and silently rejects any whose raw title OR rewritten viral title collides with `topics` history (or with a previously-tried rewrite this run), logging `Duplicate topic rejected … Replacement topic requested.` for each, then logs `Unique topic selected … Generation resumed successfully` once a clean topic is found. Only real technical errors (e.g. Cloudflare/Cerebras non-429 failures, or full exhaustion of the trending feed) propagate as failures. The legacy "Post-rewrite duplicate detected … Aborting run." error path is gone.
 
 ## Git / GitHub
 

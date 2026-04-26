@@ -2441,13 +2441,51 @@ export async function runBlogAutomation(scheduleId: string) {
       }
     }
 
+    let fbCrossPostSucceeded = false;
     if (account.facebook_page_id) {
-      const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', account.facebook_page_id).single();
+      // Try the configured FB page UUID first. If it has been deleted/replaced
+      // (the row no longer exists), self-heal by falling back to a single
+      // remaining FB page in the table — this fixes a real production bug
+      // where `blogger_accounts.facebook_page_id` pointed at a stale UUID and
+      // the FB cross-post was silently skipped.
+      let { data: fbPage } = await supabase
+        .from('facebook_pages')
+        .select('*')
+        .eq('id', account.facebook_page_id)
+        .maybeSingle();
+
+      if (!fbPage) {
+        console.warn(
+          `[automation] FB cross-post: blogger_accounts.facebook_page_id=${account.facebook_page_id} ` +
+          `does not match any row in facebook_pages. Attempting self-heal...`,
+        );
+        const { data: allPages } = await supabase.from('facebook_pages').select('*');
+        if (allPages && allPages.length === 1) {
+          fbPage = allPages[0];
+          console.warn(
+            `[automation] FB cross-post: self-healed to the only available FB page ` +
+            `id=${fbPage.id} page_id=${fbPage.page_id} name="${fbPage.name}". ` +
+            `Repairing blogger_accounts.facebook_page_id pointer for future runs.`,
+          );
+          await supabase
+            .from('blogger_accounts')
+            .update({ facebook_page_id: fbPage.id })
+            .eq('id', account.id);
+        } else {
+          console.error(
+            `[automation] FB cross-post FAILED: configured facebook_page_id is stale and ` +
+            `${allPages?.length || 0} FB page(s) are configured — cannot auto-pick one. ` +
+            `Reconnect a Facebook page in the dashboard to restore cross-posting.`,
+          );
+        }
+      }
+
       if (fbPage) {
         try {
           const teaserMessage = buildFacebookTeaser(content, topic, niche, hashtags, bloggerPost.url);
           const fbPost = await publishToFacebook(fbPage.page_id, fbPage.access_token, teaserMessage, finalImageUrl);
           const fbPostId = fbPost.post_id || fbPost.id;
+          fbCrossPostSucceeded = true;
 
           console.log(`✓ Facebook post published: https://www.facebook.com/${fbPage.page_id}/posts/${fbPostId}`);
 
@@ -2484,7 +2522,7 @@ export async function runBlogAutomation(scheduleId: string) {
           }
         } catch (fbError: any) {
           const errBody = fbError?.response?.data ? JSON.stringify(fbError.response.data) : '';
-          console.warn('[automation] Facebook cross-post warning:', fbError?.message || fbError, errBody);
+          console.error('[automation] Facebook cross-post FAILED:', fbError?.message || fbError, errBody);
         }
       }
     }
@@ -2493,7 +2531,7 @@ export async function runBlogAutomation(scheduleId: string) {
       title: topic,
       blog_name: account.name,
       niche,
-      platform: account.facebook_page_id ? 'Both' : 'Blogger',
+      platform: fbCrossPostSucceeded ? 'Both' : 'Blogger',
       status: 'published',
       url: bloggerPost.url,
       published_at: new Date().toISOString(),
