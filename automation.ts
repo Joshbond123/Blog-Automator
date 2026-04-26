@@ -1515,6 +1515,108 @@ async function pickUniqueTrendingTopic(supabase: any, niche: string): Promise<st
   );
 }
 
+/**
+ * Unified topic acquisition with silent retry on duplicates.
+ *
+ * Replaces the legacy "abort on duplicate" behavior. If a candidate (raw OR
+ * post-rewrite viral title) collides with the published-topic history, the
+ * candidate is silently rejected and the next trending candidate is tried.
+ * The run only fails when the trending feed is fully exhausted — never just
+ * because *one* topic happened to be a duplicate.
+ *
+ * Used by both `runBlogAutomation` and `runVideoAutomation`.
+ */
+async function acquireUniqueViralTopic(
+  supabase: any,
+  niche: string,
+  channel: 'blog' | 'video',
+): Promise<string> {
+  const tag = `[TopicShield][${channel}]`;
+  const candidates = await fetchTrendingTopicsForNiche(niche);
+  if (candidates.length < 20) {
+    console.warn(`${tag} Only ${candidates.length} trending candidate(s) fetched for niche="${niche}".`);
+  }
+
+  const history = await topicShield_loadHistory(supabase, niche);
+  console.log(
+    `${tag} Loaded ${history.length} historical topic(s) (cap=${TOPICSHIELD_HISTORY_CAP}) for niche="${niche}". ` +
+    `Scanning ${candidates.length} trending candidate(s) for a unique topic...`,
+  );
+
+  const seenViralTitles = new Set<string>();
+  let preRejected = 0;
+  let postRejected = 0;
+  let scanned = 0;
+
+  for (const rawCandidate of candidates) {
+    scanned += 1;
+
+    // Pass 1: raw candidate vs history.
+    const rawUnique = await topicShield_isUnique(rawCandidate, history, niche);
+    if (!rawUnique) {
+      preRejected += 1;
+      console.log(
+        `${tag} Duplicate topic rejected (raw, candidate ${scanned}/${candidates.length}): "${rawCandidate}". ` +
+        `Replacement topic requested.`,
+      );
+      continue;
+    }
+
+    // Pass 2: rewrite to viral title and re-validate.
+    let viralTitle: string;
+    try {
+      viralTitle = await rewriteToViralTitle(rawCandidate, niche);
+    } catch (err: any) {
+      const status = Number(err?.response?.status || 0);
+      if (status === 429) {
+        console.warn(`${tag} Title rewriter rate-limited; falling back to raw candidate as title.`);
+        viralTitle = rawCandidate;
+      } else {
+        // Real technical error — propagate, do NOT silently retry.
+        throw err;
+      }
+    }
+
+    const normalizedViral = viralTitle.toLowerCase().trim();
+    if (seenViralTitles.has(normalizedViral)) {
+      postRejected += 1;
+      console.log(
+        `${tag} Duplicate topic rejected (viral title collapses to a previously-tried rewrite): "${viralTitle}". ` +
+        `Replacement topic requested.`,
+      );
+      continue;
+    }
+    seenViralTitles.add(normalizedViral);
+
+    const refreshedHistory = await topicShield_loadHistory(supabase, niche);
+    const viralUnique = await topicShield_isUnique(viralTitle, refreshedHistory, niche);
+    if (!viralUnique) {
+      postRejected += 1;
+      console.log(
+        `${tag} Duplicate topic rejected (post-rewrite, candidate ${scanned}/${candidates.length}): "${viralTitle}". ` +
+        `Replacement topic requested.`,
+      );
+      continue;
+    }
+
+    console.log(
+      `${tag} Unique topic selected after scanning ${scanned}/${candidates.length} candidate(s) ` +
+      `(${preRejected} raw duplicate(s), ${postRejected} post-rewrite duplicate(s) auto-skipped). ` +
+      `Generation resumed successfully with: "${viralTitle}"`,
+    );
+    return viralTitle;
+  }
+
+  // Genuine technical exhaustion — every trending topic in the feed collided
+  // with history. This is rare and is a *real* failure, not a duplicate-only
+  // abort, so it is allowed to surface.
+  throw new Error(
+    `${tag} Exhausted all ${candidates.length} trending candidate(s) for niche="${niche}" ` +
+    `(${preRejected} raw + ${postRejected} post-rewrite duplicate(s)). ` +
+    `No unique topic available right now — wait for the trending feed to refresh or add more RSS sources.`,
+  );
+}
+
 async function rewriteToViralTitle(topic: string, niche: string) {
   const bannedLeadPattern = /^(Breaking News|Breaking:|Alert:|Exclusive:|BREAKING|Revealed:|Discover:|Uncover:|Hidden Secrets:?|The Ultimate)/i;
   const raw = await generateText(
@@ -2223,34 +2325,16 @@ export async function runBlogAutomation(scheduleId: string) {
 
   try {
     const forcedTopic = String((schedule?.metadata as any)?.forced_topic || '').trim() || process.env.FORCED_TOPIC || '';
-    const discoveredTopic = forcedTopic || await pickUniqueTrendingTopic(supabase, niche);
-    let topic = discoveredTopic;
-    if (!forcedTopic) {
-      try {
-        topic = await rewriteToViralTitle(discoveredTopic, niche);
-      } catch (titleError: any) {
-        const status = Number(titleError?.response?.status || 0);
-        if (status === 429) {
-          console.warn('[automation] Cloudflare text generation rate-limited during title rewrite; using discovered topic as title fallback.');
-          topic = discoveredTopic;
-        } else {
-          throw titleError;
-        }
-      }
-
-      // ── TopicShield-100: Post-rewrite check ────────────────────────────────
-      // The raw candidate passed the pre-selection check, but the rewritten
-      // viral title must ALSO be checked — different raw headlines can produce
-      // nearly identical final titles, which is a duplicate.
-      const postRewriteHistory = await topicShield_loadHistory(supabase, niche);
-      const viralTitleIsUnique = await topicShield_isUnique(topic, postRewriteHistory, niche);
-      if (!viralTitleIsUnique) {
-        throw new Error(
-          `[TopicShield] Post-rewrite duplicate detected: viral title "${topic}" is too similar to a previously published topic. Aborting run.`
-        );
-      }
-      console.log(`[TopicShield] Post-rewrite check passed for: "${topic}"`);
-      // ── end TopicShield post-rewrite check ────────────────────────────────
+    let topic: string;
+    if (forcedTopic) {
+      // Operator-forced topic bypasses duplicate detection by design.
+      topic = forcedTopic;
+      console.log(`[TopicShield][blog] Using operator-forced topic (duplicate check bypassed): "${topic}"`);
+    } else {
+      // Unified topic acquisition with silent retry on duplicates. Will only
+      // throw for real technical errors (e.g. exhausted trending feed), never
+      // for a single duplicate hit.
+      topic = await acquireUniqueViralTopic(supabase, niche, 'blog');
     }
     let content = '';
     try {
@@ -2907,57 +2991,14 @@ export async function runVideoAutomation(scheduleId: string) {
     }).select().single();
     jobId = jobRow?.id || '';
 
-    // ── 2. Fetch 100 trending topics from the web + TopicShield selection
-    console.log(`[video] Fetching trending topics and selecting unique topic for niche="${niche}"...`);
-    const rawTopic = await pickUniqueTrendingTopic(supabase, niche);
-    if (!rawTopic) throw new Error(`TopicShield could not find a unique topic for niche="${niche}"`);
-
-    // ── 4. Rewrite topic to viral headline + post-rewrite duplicate check
+    // ── 2. Pick a unique trending topic + rewrite to a viral headline.
     //
-    // CRITICAL: pickUniqueTrendingTopic only validated the RAW RSS title.
-    // Different raw RSS headlines can collapse to the same viral title once
-    // rewritten by the AI, producing duplicate videos. We must therefore
-    // re-validate the FINAL viral title against history before using it,
-    // mirroring runBlogAutomation's post-rewrite check.
-    const MAX_REWRITE_ATTEMPTS = 6;
-    let rewriteAttempt = 0;
-    let acceptedTopic = '';
-    let lastRejectedTopic = '';
-    while (rewriteAttempt < MAX_REWRITE_ATTEMPTS && !acceptedTopic) {
-      rewriteAttempt += 1;
-      const candidateTopic = await rewriteToViralTitle(rawTopic, niche);
-      const postRewriteHistory = await topicShield_loadHistory(supabase, niche);
-      const isUnique = await topicShield_isUnique(candidateTopic, postRewriteHistory, niche);
-      if (isUnique) {
-        acceptedTopic = candidateTopic;
-        break;
-      }
-      lastRejectedTopic = candidateTopic;
-      console.warn(
-        `[TopicShield] Post-rewrite duplicate on attempt ${rewriteAttempt}/${MAX_REWRITE_ATTEMPTS}: "${candidateTopic}" — retrying with a fresh trending topic.`,
-      );
-      // Pull a brand-new RSS candidate so the rewriter has different source material.
-      const freshRaw = await pickUniqueTrendingTopic(supabase, niche).catch(() => '');
-      if (freshRaw) {
-        // Tail-call style: re-bind the local rawTopic for the next loop iteration
-        // by reusing the variable through a retry of the rewrite step.
-        // (We can't reassign the const above, but rewriteToViralTitle accepts any source.)
-        const retryTopic = await rewriteToViralTitle(freshRaw, niche);
-        const retryHistory = await topicShield_loadHistory(supabase, niche);
-        if (await topicShield_isUnique(retryTopic, retryHistory, niche)) {
-          acceptedTopic = retryTopic;
-          break;
-        }
-        lastRejectedTopic = retryTopic;
-      }
-    }
-    if (!acceptedTopic) {
-      throw new Error(
-        `[TopicShield] Could not produce a unique viral title after ${MAX_REWRITE_ATTEMPTS} rewrite attempts. ` +
-          `Last rejected title: "${lastRejectedTopic}". Aborting to prevent duplicate publishing.`,
-      );
-    }
-    topic = acceptedTopic;
+    // Uses the unified `acquireUniqueViralTopic` helper so duplicate detection
+    // (raw OR post-rewrite) silently rejects and retries with the next trending
+    // candidate instead of aborting the run. Only real technical failures
+    // (e.g. trending feed exhausted) propagate as errors.
+    console.log(`[video] Fetching trending topics and selecting unique topic for niche="${niche}"...`);
+    topic = await acquireUniqueViralTopic(supabase, niche, 'video');
     console.log(`[video] Topic selected & rewritten (unique-verified): "${topic}"`);
 
     // ── 5. Generate structured video script (voiceover + scenes + hashtags)
