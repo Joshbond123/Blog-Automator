@@ -2290,23 +2290,108 @@ async function waitForOverlayArtifact(repo: string, token: string, correlationId
 }
 
 async function publishToFacebook(pageId: string, accessToken: string, message: string, imageUrl?: string) {
+  // FB Graph API is most reliable with form-encoded bodies. Also explicitly set
+  // `published=true` so the post is published immediately (no scheduled drafts).
+  const formHeaders = { 'Content-Type': 'application/x-www-form-urlencoded' };
+
   if (imageUrl && /^https?:\/\//i.test(imageUrl)) {
+    const body = new URLSearchParams({
+      caption: message,
+      url: imageUrl,
+      published: 'true',
+      access_token: accessToken,
+    });
     const res = await axios.post(
       `https://graph.facebook.com/v19.0/${pageId}/photos`,
-      { caption: message, url: imageUrl, access_token: accessToken },
-      outboundConfig(),
+      body.toString(),
+      outboundConfig({ headers: formHeaders, timeout: 60000 }),
     );
+    console.log(`[FB] /photos response keys: ${Object.keys(res.data || {}).join(',')} body=${JSON.stringify(res.data).slice(0, 300)}`);
     return res.data;
   }
+
+  const body = new URLSearchParams({
+    message,
+    published: 'true',
+    access_token: accessToken,
+  });
   const res = await axios.post(
     `https://graph.facebook.com/v19.0/${pageId}/feed`,
-    { message, access_token: accessToken },
-    outboundConfig(),
+    body.toString(),
+    outboundConfig({ headers: formHeaders, timeout: 60000 }),
   );
+  console.log(`[FB] /feed response keys: ${Object.keys(res.data || {}).join(',')} body=${JSON.stringify(res.data).slice(0, 300)}`);
   return res.data;
 }
 
+// Verify a Facebook post actually exists and is published. Some failure modes
+// (spam filtering, image URL FB couldn't fetch, soft-rejected duplicates) cause
+// FB Graph API to return 200 OK with a post id, but the post never appears on
+// the page. We catch those silent failures here so the run is recorded
+// honestly as a Blogger-only publish.
+async function verifyFacebookPostExists(pageId: string, accessToken: string, returnedFromCreate: any): Promise<{ ok: boolean; postId: string; reason: string; permalink?: string }> {
+  const candidateIds = [
+    returnedFromCreate?.post_id,
+    returnedFromCreate?.id,
+  ].map((v) => String(v || '').trim()).filter(Boolean);
+  if (candidateIds.length === 0) {
+    return { ok: false, postId: '', reason: 'create response had no id/post_id' };
+  }
+
+  // Try each candidate id (post_id is preferred; some endpoints only return id)
+  for (const id of candidateIds) {
+    try {
+      const res = await axios.get(
+        `https://graph.facebook.com/v19.0/${id}`,
+        outboundConfig({
+          params: { fields: 'id,is_published,permalink_url,from', access_token: accessToken },
+          timeout: 20000,
+          validateStatus: () => true,
+        }),
+      );
+      const data: any = res.data || {};
+      if (res.status >= 200 && res.status < 300 && data.id) {
+        const isPublished = data.is_published !== false; // FB defaults to true if field omitted
+        const fromId = String(data?.from?.id || '');
+        const matchesPage = !fromId || fromId === String(pageId);
+        if (isPublished && matchesPage) {
+          return { ok: true, postId: id, reason: 'verified', permalink: data.permalink_url };
+        }
+        return { ok: false, postId: id, reason: `verification fields say is_published=${data.is_published} from=${fromId}` };
+      }
+      // 4xx / 5xx — try next candidate id
+    } catch {
+      // try next candidate id
+    }
+  }
+  return { ok: false, postId: candidateIds[0], reason: 'GET on returned id(s) did not confirm a published post (FB silently dropped it)' };
+}
+
+// Per-schedule in-memory locks to prevent rapid-fire manual triggers from
+// running the same automation in parallel. Three rapid clicks on "Run now"
+// previously caused 3 simultaneous Blogger+Facebook publishes that fought
+// over GitHub Actions correlationIds and tripped FB's spam filter — leaving
+// some posts on Blogger but missing on Facebook.
+const blogRunLocks: Map<string, Promise<void>> = new Map();
+
 export async function runBlogAutomation(scheduleId: string) {
+  const existing = blogRunLocks.get(scheduleId);
+  if (existing) {
+    console.warn(`[automation] Blog run for schedule ${scheduleId} already in progress — waiting for it to finish before starting a new one.`);
+    try { await existing; } catch { /* prior run failure is logged in its own scope */ }
+  }
+  const runPromise = (async () => { await runBlogAutomationInner(scheduleId); })();
+  blogRunLocks.set(scheduleId, runPromise);
+  try {
+    await runPromise;
+  } finally {
+    if (blogRunLocks.get(scheduleId) === runPromise) {
+      blogRunLocks.delete(scheduleId);
+    }
+  }
+}
+
+async function runBlogAutomationInner(scheduleId: string) {
   const supabase = getSupabase();
   const { data: schedule } = await supabase.from('schedules').select('*').eq('id', scheduleId).single();
   if (!schedule) return;
@@ -2484,10 +2569,25 @@ export async function runBlogAutomation(scheduleId: string) {
         try {
           const teaserMessage = buildFacebookTeaser(content, topic, niche, hashtags, bloggerPost.url);
           const fbPost = await publishToFacebook(fbPage.page_id, fbPage.access_token, teaserMessage, finalImageUrl);
-          const fbPostId = fbPost.post_id || fbPost.id;
+
+          // CRITICAL: FB sometimes returns 200 with an id but the post never
+          // actually appears on the page (spam filtering, image fetch failure,
+          // soft duplicate rejection). VERIFY the post exists before declaring
+          // success — otherwise the DB shows platform='Both' for FB-missing
+          // posts and the user can't tell anything is wrong.
+          const verification = await verifyFacebookPostExists(fbPage.page_id, fbPage.access_token, fbPost);
+          if (!verification.ok) {
+            throw new Error(
+              `Facebook returned a post id (${verification.postId}) but the post is NOT live on the page. ` +
+              `Reason: ${verification.reason}. ` +
+              `This usually means FB silently rejected the post (spam filter, unreachable image URL, or duplicate-content heuristic).`,
+            );
+          }
+
+          const fbPostId = verification.postId;
           fbCrossPostSucceeded = true;
 
-          console.log(`✓ Facebook post published: https://www.facebook.com/${fbPage.page_id}/posts/${fbPostId}`);
+          console.log(`✓ Facebook post VERIFIED live on page: ${verification.permalink || `https://www.facebook.com/${fbPage.page_id}/posts/${fbPostId}`}`);
 
           // Post the link-bearing comment in its own try/catch + retry so a
           // transient LLM or Graph API failure NEVER leaves the FB post
