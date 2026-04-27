@@ -33,7 +33,7 @@ export const defaultProps: ViralProps = {
   scenes: [],
   words: [],
   durationInSeconds: 60,
-  cta: "LIKE, SHARE & FOLLOW — CHECK LINK IN BIO",
+  cta: "LIKE, SHARE & FOLLOW — CHECK LINK IN COMMENTS",
   hookText: "",
 };
 
@@ -331,7 +331,7 @@ export const ViralVideo: React.FC<ViralProps> = ({
       <HookOverlay text={hookText} />
       <Subtitles words={words} />
       {/* No visual CTA overlay — the call-to-action is delivered as the spoken
-          last sentence of the voiceover (like / share / follow / link in bio). */}
+          last sentence of the voiceover (like / share / follow / link in comments). */}
 
       <Audio src={staticFile(audioSrc)} />
       {hasMusic ? <Audio src={staticFile(musicSrc)} volume={0.06} /> : null}

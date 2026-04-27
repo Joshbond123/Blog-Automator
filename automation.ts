@@ -2178,9 +2178,9 @@ async function syncRenderScriptToGithub(repo: string, token: string) {
 }
 
 // AI-generated viral CTA per video. Always includes the required phrases:
-// "check link in bio" and a like/share/follow ask.
+// "check link in comments" and a like/share/follow ask.
 async function generateVideoCTA(topic: string, niche: string): Promise<string> {
-  const fallback = 'LIKE, SHARE & FOLLOW — CHECK LINK IN BIO!';
+  const fallback = 'LIKE, SHARE & FOLLOW — CHECK LINK IN COMMENTS!';
   try {
     const raw = await generateText(
       `Write ONE viral short-form-video CTA (call to action) for a video about "${topic}" in the ${niche} niche.
@@ -2189,14 +2189,14 @@ REQUIREMENTS:
 - ALL CAPS
 - 8 to 14 words MAX (must fit on screen)
 - Punchy, urgent, emotional energy
-- MUST include the phrase "CHECK LINK IN BIO"
+- MUST include the phrase "CHECK LINK IN COMMENTS"
 - MUST also include a like/share/follow ask (e.g. "LIKE, SHARE & FOLLOW")
 - No hashtags, no quotes, no emojis
 Return ONLY the CTA text, nothing else.`,
       niche,
     );
     let text = String(raw || '').trim().replace(/^["'`]+|["'`]+$/g, '').toUpperCase();
-    if (!/CHECK LINK IN BIO/.test(text)) text = `${text} — CHECK LINK IN BIO`;
+    if (!/CHECK LINK IN COMMENTS/.test(text)) text = `${text} — CHECK LINK IN COMMENTS`;
     if (!/(LIKE|SHARE|FOLLOW)/.test(text)) text = `LIKE, SHARE & FOLLOW — ${text}`;
     // Hard cap so it always fits on screen
     if (text.length > 90) text = text.slice(0, 87) + '...';
@@ -2764,7 +2764,7 @@ REQUIREMENTS:
 - voiceover: EXACTLY 135-150 words of natural spoken narration so it lands at ~55-60 seconds when read at a normal pace. NEVER fewer than 130 words and NEVER more than 155 words.
   • Open with a 5-7 word HOOK that creates instant curiosity (no "Did you know", no "Have you ever").
   • Deliver 3-4 specific, surprising facts in conversational TikTok/Reels energy.
-  • The LAST 12-18 words MUST be a spoken CTA that says (in your own natural words): like the video, share it with someone, follow the page, and visit the blog link in the bio for the full story / more posts. The CTA must sound human and energetic — not robotic.
+  • The LAST 12-18 words MUST be a spoken CTA that says (in your own natural words): like the video, share it with someone, follow the page, and visit the blog link in the comments for the full story / more posts. The CTA must sound human and energetic — not robotic.
 - scenes: exactly 5 scene descriptions. Each must be a DETAILED image generation prompt. Cinematic, realistic, NO TEXT, NO WORDS, NO SIGNS, NO LETTERS in the image.
 - hashtags: exactly 5 SHORT viral hashtags. EACH tag is ONE short word (max 12 letters after the #). Never join multiple words into one tag. Examples of GOOD tags: #Tech #AI #Viral #Tips #Facts #Trending #Food #Recipe. Examples of BAD tags (forbidden): #StoryBehindTheIce #DiscoveryAlertWatch #DeepDiveStory.
 
