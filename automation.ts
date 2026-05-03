@@ -384,11 +384,20 @@ async function generateText(prompt: string, niche: string) {
   const MAX_ATTEMPTS = 3;
   let lastError: any = null;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Before picking a key, wait only for the SOONEST key to become available
+    // (not the full cooldown of the selected key). Cap at 15s to avoid long stalls.
+    const allKeys = (await getSettings()).cerebras_keys?.map((e: any) => getEntryKey(e)).filter(Boolean) || [];
+    const soonestAvailable = allKeys.map((k: string) => Number(cerebrasRateLimitUntil.get(k) || 0))
+      .filter((t: number) => t > Date.now()).sort((a: number, b: number) => a - b)[0];
+    if (soonestAvailable) {
+      const waitMs = Math.min(soonestAvailable - Date.now(), 15_000);
+      if (waitMs > 0) await sleep(waitMs);
+    }
     const selected = await pickRotatingKey('cerebras_keys', 'cerebras_rotation_index');
     const cooldownUntil = Number(cerebrasRateLimitUntil.get(selected.key) || 0);
     if (cooldownUntil > Date.now()) {
-      // Cap the wait so we don't block the automation thread for >30s
-      const waitMs = Math.min(cooldownUntil - Date.now(), 30_000);
+      // Cap the wait so we don't block the automation thread for >10s
+      const waitMs = Math.min(cooldownUntil - Date.now(), 10_000);
       console.log(`[automation] Cerebras key ${keyFingerprint(selected.key)} rate-limited; waiting ${Math.round(waitMs / 1000)}s (capped)`);
       await sleep(waitMs);
     }
@@ -2385,7 +2394,7 @@ const blogRunLocks: Map<string, Promise<void>> = new Map();
 
 // Maximum wall-clock time for a single blog automation run. Prevents hung
 // AI calls (Cerebras / Cloudflare) from blocking the schedule permanently.
-const BLOG_AUTOMATION_TIMEOUT_MS = 7 * 60 * 1000; // 7 minutes
+const BLOG_AUTOMATION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
 
 export async function runBlogAutomation(scheduleId: string) {
   const existing = blogRunLocks.get(scheduleId);
