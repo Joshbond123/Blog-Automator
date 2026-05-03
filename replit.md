@@ -68,6 +68,15 @@ Configured as autoscale deployment:
 - **Build**: `npm run build`
 - **Run**: `node --import tsx/esm server.ts` (serves built static files in production mode)
 
+## Verified End-to-End (2026-05-03)
+
+All publishing pipelines confirmed working:
+- **Blog → Blogger**: Published https://strangefacthub.blogspot.com/2026/05/oregon-condo-residents-find-raccoon.html (Strange Facts Hub, Weird Facts & Discoveries niche)
+- **Blog → Facebook**: Verified live https://www.facebook.com/122120380743172622/posts/122126110737172622
+- **Video → Facebook**: Published https://www.facebook.com/819112321295964/videos/3534082316740308 (Cold Case Secrets, "New leads emerge in JonBenét Ramsey case", 51.2s Remotion render)
+- **Settings page**: Fixed blank/black screen bug (React hooks violation — `showBloggerToken` state moved to component level in `src/App.tsx`)
+- **Blogger OAuth credentials**: `blogger_client_id` + `blogger_client_secret` were encrypted with the original project's unknown key. Re-entered by user on 2026-05-03 and re-encrypted with current `SUPABASE_SERVICE_ROLE_KEY`-derived AES key. Stored in `settings` table as `enc:v1:...`. `blogger_refresh_token` was always plaintext.
+
 ## Key Notes
 
 - Secrets stored in Supabase are encrypted with AES-256-GCM using `APP_ENCRYPTION_KEY` or `SUPABASE_SERVICE_ROLE_KEY`
