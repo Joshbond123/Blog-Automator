@@ -1259,6 +1259,7 @@ const Settings = () => {
   const [usApiKey, setUsApiKey] = useState('');
   const [cerebrasApiKey, setCerebrasApiKey] = useState('');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [showBloggerToken, setShowBloggerToken] = useState(false);
   const maskValue = (value?: string, start = 6, end = 4) => {
     if (!value) return 'Not set';
     if (value.length <= start + end) return '•'.repeat(Math.max(value.length, 8));
@@ -1830,44 +1831,37 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     </div>
                   </div>
 
-                  {(() => {
-                    const [showToken, setShowToken] = React.useState(false);
-                    const tokenValue = settings.blogger_refresh_token || '';
-                    const isTokenSet = Boolean(tokenValue);
-                    return (
-                      <div className="space-y-3">
-                        <div className="flex items-center justify-between ml-1">
-                          <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider">Refresh Token</label>
-                          {isTokenSet && (
-                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">
-                              <CheckCircle2 className="w-3 h-3" /> Token saved
-                            </span>
-                          )}
-                        </div>
-                        <div className="relative group">
-                          <RefreshCw className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
-                          <input
-                            type={showToken ? 'text' : 'password'}
-                            value={tokenValue}
-                            onChange={(e) => setSettings({ ...settings, blogger_refresh_token: e.target.value })}
-                            className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-14 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg font-mono"
-                            placeholder="Paste your new refresh token here"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setShowToken(v => !v)}
-                            className="absolute right-4 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors"
-                            title={showToken ? 'Hide token' : 'Show token'}
-                          >
-                            {showToken ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
-                          </button>
-                        </div>
-                        <p className="text-xs text-zinc-600 ml-1">
-                          Paste the full token exactly as received from Google OAuth. It will be saved securely.
-                        </p>
-                      </div>
-                    );
-                  })()}
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between ml-1">
+                      <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider">Refresh Token</label>
+                      {Boolean(settings.blogger_refresh_token) && (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">
+                          <CheckCircle2 className="w-3 h-3" /> Token saved
+                        </span>
+                      )}
+                    </div>
+                    <div className="relative group">
+                      <RefreshCw className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
+                      <input
+                        type={showBloggerToken ? 'text' : 'password'}
+                        value={settings.blogger_refresh_token || ''}
+                        onChange={(e) => setSettings({ ...settings, blogger_refresh_token: e.target.value })}
+                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-14 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg font-mono"
+                        placeholder="Paste your new refresh token here"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowBloggerToken(v => !v)}
+                        className="absolute right-4 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors"
+                        title={showBloggerToken ? 'Hide token' : 'Show token'}
+                      >
+                        {showBloggerToken ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                      </button>
+                    </div>
+                    <p className="text-xs text-zinc-600 ml-1">
+                      Paste the full token exactly as received from Google OAuth. It will be saved securely.
+                    </p>
+                  </div>
 
                   <button
                     onClick={() => saveSection('blogger-oauth', {
