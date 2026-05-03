@@ -379,12 +379,18 @@ async function generateText(prompt: string, niche: string) {
   const knownKeys = (initialSettings.cerebras_keys || []).map((entry: any) => getEntryKey(entry)).filter(Boolean);
   if (!knownKeys.length) throw new Error('No Cerebras API keys configured for text generation.');
 
+  // Max 3 attempts to avoid hanging the automation for 30+ minutes on 429 storms.
+  // The blog/video automations have fallback article generation if this throws.
+  const MAX_ATTEMPTS = 3;
   let lastError: any = null;
-  for (let attempt = 1; attempt <= 10; attempt++) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     const selected = await pickRotatingKey('cerebras_keys', 'cerebras_rotation_index');
     const cooldownUntil = Number(cerebrasRateLimitUntil.get(selected.key) || 0);
     if (cooldownUntil > Date.now()) {
-      await waitForCerebrasKeyAvailability(knownKeys.length ? knownKeys : [selected.key]);
+      // Cap the wait so we don't block the automation thread for >30s
+      const waitMs = Math.min(cooldownUntil - Date.now(), 30_000);
+      console.log(`[automation] Cerebras key ${keyFingerprint(selected.key)} rate-limited; waiting ${Math.round(waitMs / 1000)}s (capped)`);
+      await sleep(waitMs);
     }
     try {
       const res = await axios.post(
@@ -398,7 +404,7 @@ async function generateText(prompt: string, niche: string) {
             { role: 'user', content: prompt }
           ]
         },
-        outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 120000 })
+        outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 45000 })
       );
 
       await trackKeyUsage('cerebras_keys', 'cerebras_rotation_index', selected.key, true);
@@ -411,12 +417,15 @@ async function generateText(prompt: string, niche: string) {
       await trackKeyUsage('cerebras_keys', 'cerebras_rotation_index', selected.key, false);
       const status = Number(err?.response?.status || 0);
       if (status === 429 || status === 503) {
-        const retryMs = computeRetryDelayMs(err, attempt, 8_000, 180_000);
-        markCerebrasRateLimited(selected.key, retryMs);
+        // Mark rate-limited for 60s (not 180s) so future runs aren't blocked as long
+        markCerebrasRateLimited(selected.key, 60_000);
       }
       const transient = !status || status >= 500 || status === 429 || status === 503;
-      if (attempt < 10 && transient) {
-        await sleep(computeRetryDelayMs(err, attempt, 4_000, 180_000));
+      if (attempt < MAX_ATTEMPTS && transient) {
+        // Cap retry delay at 10s to keep total attempt time reasonable
+        const delay = Math.min(computeRetryDelayMs(err, attempt, 3_000, 30_000), 10_000);
+        console.warn(`[automation] Cerebras attempt ${attempt}/${MAX_ATTEMPTS} failed (${status || 'network'}); retrying in ${Math.round(delay / 1000)}s...`);
+        await sleep(delay);
         continue;
       }
       throw err;
@@ -2374,20 +2383,45 @@ async function verifyFacebookPostExists(pageId: string, accessToken: string, ret
 // some posts on Blogger but missing on Facebook.
 const blogRunLocks: Map<string, Promise<void>> = new Map();
 
+// Maximum wall-clock time for a single blog automation run. Prevents hung
+// AI calls (Cerebras / Cloudflare) from blocking the schedule permanently.
+const BLOG_AUTOMATION_TIMEOUT_MS = 7 * 60 * 1000; // 7 minutes
+
 export async function runBlogAutomation(scheduleId: string) {
   const existing = blogRunLocks.get(scheduleId);
   if (existing) {
     console.warn(`[automation] Blog run for schedule ${scheduleId} already in progress — waiting for it to finish before starting a new one.`);
     try { await existing; } catch { /* prior run failure is logged in its own scope */ }
   }
-  const runPromise = (async () => { await runBlogAutomationInner(scheduleId); })();
-  blogRunLocks.set(scheduleId, runPromise);
+
+  const timeoutPromise = new Promise<void>((_, reject) =>
+    setTimeout(() => reject(new Error(`Blog automation timed out after ${BLOG_AUTOMATION_TIMEOUT_MS / 60000} minutes`)), BLOG_AUTOMATION_TIMEOUT_MS)
+  );
+
+  const runPromise = (async () => {
+    await Promise.race([runBlogAutomationInner(scheduleId), timeoutPromise]);
+  })().catch(async (timeoutErr: any) => {
+    // If timeout fires before inner function handles it, write the failure status ourselves
+    if (String(timeoutErr?.message || '').includes('timed out')) {
+      console.error(`[blog] ✗ Automation timed out — schedule=${scheduleId}: ${timeoutErr.message}`);
+      try {
+        const supabase = getSupabase();
+        const { data: sch } = await supabase.from('schedules').select('metadata').eq('id', scheduleId).single();
+        if (sch) {
+          await supabase.from('schedules')
+            .update({ metadata: buildScheduleMetadataStatus(sch.metadata, `failed: ${timeoutErr.message}`) })
+            .eq('id', scheduleId);
+        }
+      } catch { /* best-effort */ }
+    }
+    throw timeoutErr;
+  });
+
+  blogRunLocks.set(scheduleId, runPromise.then(() => undefined).catch(() => undefined));
   try {
     await runPromise;
   } finally {
-    if (blogRunLocks.get(scheduleId) === runPromise) {
-      blogRunLocks.delete(scheduleId);
-    }
+    blogRunLocks.delete(scheduleId);
   }
 }
 
@@ -3162,6 +3196,10 @@ Return ONLY the caption text.`,
   }
 }
 
+// Maximum wall-clock time for a single video automation run (video renders can be long,
+// but if we haven't dispatched within 15 min something is stuck).
+const VIDEO_AUTOMATION_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+
 export async function runVideoAutomation(scheduleId: string) {
   const supabase = getSupabase();
   const { data: schedule } = await supabase.from('schedules').select('*').eq('id', scheduleId).single();
@@ -3170,6 +3208,27 @@ export async function runVideoAutomation(scheduleId: string) {
     return;
   }
 
+  // Wrap the entire video body in a timeout so stuck AI calls don't block forever
+  const timeoutId = setTimeout(async () => {
+    console.error(`[video] ✗ Automation timed out after ${VIDEO_AUTOMATION_TIMEOUT_MS / 60000} min — schedule=${scheduleId}`);
+    try {
+      const { data: sch } = await supabase.from('schedules').select('metadata').eq('id', scheduleId).single();
+      if (sch) {
+        await supabase.from('schedules')
+          .update({ metadata: buildScheduleMetadataStatus(sch.metadata, `failed: video automation timed out after ${VIDEO_AUTOMATION_TIMEOUT_MS / 60000} minutes`) })
+          .eq('id', scheduleId);
+      }
+    } catch { /* best-effort */ }
+  }, VIDEO_AUTOMATION_TIMEOUT_MS);
+
+  try {
+    await runVideoAutomationInner(supabase, schedule, scheduleId);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function runVideoAutomationInner(supabase: any, schedule: any, scheduleId: string) {
   const fbPageId = String(schedule.target_id || '').trim();
   const { data: fbPage } = await supabase.from('facebook_pages').select('*').eq('id', fbPageId).single();
   if (!fbPage) {
