@@ -2501,7 +2501,9 @@ async function runBlogAutomationInner(scheduleId: string) {
       throw new Error(`Pre-publish validation failed: title "${topic}" uses forbidden AI-generated prefix.`);
     }
     if (topic.split(/\s+/).length > 18) {
-      throw new Error(`Pre-publish validation failed: title too long (${topic.split(/\s+/).length} words). Max 18.`);
+      const words = topic.split(/\s+/);
+      topic = words.slice(0, 18).join(' ');
+      console.warn(`[blog] Title truncated to 18 words: "${topic}"`);
     }
     if (topic.split(/\s+/).length < 4) {
       throw new Error(`Pre-publish validation failed: title "${topic}" is too short to be a natural headline.`);
