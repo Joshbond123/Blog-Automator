@@ -2533,14 +2533,26 @@ async function runBlogAutomationInner(scheduleId: string) {
         break;
       } catch (pubErr: any) {
         const pubStatus = Number(pubErr?.response?.status || 0);
+        const pubApiData = pubErr?.response?.data;
+        const pubApiDetail = pubApiData
+          ? (typeof pubApiData === 'object'
+              ? (pubApiData?.error?.message || pubApiData?.message || JSON.stringify(pubApiData).slice(0, 200))
+              : String(pubApiData).slice(0, 200))
+          : '';
+        const pubErrFull = pubApiDetail
+          ? `${pubErr?.message || pubErr} [HTTP ${pubStatus}] — ${pubApiDetail}`
+          : `${pubErr?.message || pubErr}${pubStatus ? ` [HTTP ${pubStatus}]` : ''}`;
         const transient = !pubStatus || pubStatus >= 500 || pubStatus === 429;
         if (publishAttempt < 3 && transient) {
           const delay = Math.min(15000, 3000 * publishAttempt);
-          console.warn(`[automation] Blogger publish attempt ${publishAttempt} failed (${pubErr?.message || pubErr}); retrying in ${delay}ms...`);
+          console.warn(`[automation] Blogger publish attempt ${publishAttempt} failed: ${pubErrFull}; retrying in ${delay}ms...`);
           await sleep(delay);
         } else {
-          console.error(`[automation] Blogger publish failed after ${publishAttempt} attempt(s): ${pubErr?.message || pubErr}`);
-          throw pubErr;
+          console.error(`[automation] Blogger publish failed after ${publishAttempt} attempt(s): ${pubErrFull}`);
+          // Re-throw with the enriched message so the catch block stores the full detail
+          const enriched = new Error(pubErrFull) as any;
+          enriched.response = pubErr?.response;
+          throw enriched;
         }
       }
     }
@@ -2711,7 +2723,20 @@ async function runBlogAutomationInner(scheduleId: string) {
       .eq('id', scheduleId);
   } catch (error: any) {
     const errMsg = String(error?.message || error || 'unknown error');
-    console.error(`[blog] ✗ Publish failure — schedule=${scheduleId}: ${errMsg}`);
+    // Extract the real API error body so the user sees the actual reason (e.g. Blogger 400 detail)
+    const apiData = error?.response?.data;
+    let apiDetail = '';
+    if (apiData) {
+      if (typeof apiData === 'object') {
+        // Google APIs return { error: { message, code, status } }
+        apiDetail = apiData?.error?.message || apiData?.message || apiData?.error_description || JSON.stringify(apiData).slice(0, 250);
+      } else {
+        apiDetail = String(apiData).slice(0, 250);
+      }
+    }
+    const httpStatus = error?.response?.status ? ` [HTTP ${error.response.status}]` : '';
+    const fullErrMsg = apiDetail ? `${errMsg}${httpStatus} — ${apiDetail}` : `${errMsg}${httpStatus}`;
+    console.error(`[blog] ✗ Publish failure — schedule=${scheduleId}: ${fullErrMsg}`);
     await supabase.from('posts').insert({
       title: 'Failed to generate post',
       blog_name: account.name,
@@ -2722,7 +2747,7 @@ async function runBlogAutomationInner(scheduleId: string) {
     });
     await supabase
       .from('schedules')
-      .update({ metadata: buildScheduleMetadataStatus(schedule.metadata, `failed: ${errMsg.slice(0, 300)}`) })
+      .update({ metadata: buildScheduleMetadataStatus(schedule.metadata, `failed: ${fullErrMsg.slice(0, 400)}`) })
       .eq('id', scheduleId);
   }
 }
