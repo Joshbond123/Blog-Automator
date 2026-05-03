@@ -1830,19 +1830,44 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                     </div>
                   </div>
 
-                  <div className="space-y-3">
-                    <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider ml-1">Refresh Token</label>
-                    <div className="relative group">
-                      <RefreshCw className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
-                      <input
-                        type="password"
-                        value={settings.blogger_refresh_token || ''}
-                        onChange={(e) => setSettings({ ...settings, blogger_refresh_token: e.target.value })}
-                        className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-4 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg"
-                        placeholder="Blogger OAuth Refresh Token"
-                      />
-                    </div>
-                  </div>
+                  {(() => {
+                    const [showToken, setShowToken] = React.useState(false);
+                    const tokenValue = settings.blogger_refresh_token || '';
+                    const isTokenSet = Boolean(tokenValue);
+                    return (
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between ml-1">
+                          <label className="text-sm font-bold text-zinc-400 uppercase tracking-wider">Refresh Token</label>
+                          {isTokenSet && (
+                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">
+                              <CheckCircle2 className="w-3 h-3" /> Token saved
+                            </span>
+                          )}
+                        </div>
+                        <div className="relative group">
+                          <RefreshCw className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-zinc-600 group-focus-within:text-indigo-500 transition-colors" />
+                          <input
+                            type={showToken ? 'text' : 'password'}
+                            value={tokenValue}
+                            onChange={(e) => setSettings({ ...settings, blogger_refresh_token: e.target.value })}
+                            className="w-full bg-zinc-950 border border-zinc-800 rounded-2xl pl-12 pr-14 py-4 text-white focus:outline-none focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all text-lg font-mono"
+                            placeholder="Paste your new refresh token here"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowToken(v => !v)}
+                            className="absolute right-4 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300 transition-colors"
+                            title={showToken ? 'Hide token' : 'Show token'}
+                          >
+                            {showToken ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+                          </button>
+                        </div>
+                        <p className="text-xs text-zinc-600 ml-1">
+                          Paste the full token exactly as received from Google OAuth. It will be saved securely.
+                        </p>
+                      </div>
+                    );
+                  })()}
 
                   <button
                     onClick={() => saveSection('blogger-oauth', {
@@ -1860,40 +1885,41 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS ads_scripts TEXT;`}
                   <div className="space-y-4">
                     <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-[0.14em]">Saved Configurations</h4>
                     {hasBloggerSaved ? (
-                    <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 flex items-center justify-between shadow-lg shadow-black/20">
-                      <p className="text-zinc-400 text-sm">Saved Blogger OAuth credentials.</p>
-
-                      <div className="flex items-center gap-3">
-                      <button
-                        onClick={async () => { const res = await fetch('/api/blogger/available-accounts'); if (!res.ok) { const payload = await res.json().catch(() => ({})); alert(payload.error || 'Unable to fetch Blogger accounts'); return; } const blogs = await res.json(); alert(`Fetched ${Array.isArray(blogs) ? blogs.length : 0} Blogger account(s). Open Blogger Accounts page to connect them.`); }}
-                        className="text-emerald-400 hover:text-emerald-300 text-sm font-bold"
-                      >
-                        Fetch Blogger Accounts
-                      </button>
-                      <button
-                        onClick={() => saveSection('blogger-oauth', {
-                          blogger_client_id: settings.blogger_client_id,
-                          blogger_client_secret: settings.blogger_client_secret,
-                          blogger_refresh_token: settings.blogger_refresh_token
-                        })}
-                        className="text-indigo-400 hover:text-indigo-300 text-sm font-bold"
-                      >
-                        Edit
-                      </button>
-
-                      <button
-                        onClick={() => {
-                          deleteSettingField('blogger_client_id');
-                          deleteSettingField('blogger_client_secret');
-                          deleteSettingField('blogger_refresh_token');
-                        }}
-                        className="text-rose-400 hover:text-rose-300 text-sm font-bold"
-                      >
-                        Delete
-                      </button>
-
+                    <div className="bg-zinc-950/80 border border-zinc-800 rounded-3xl p-5 space-y-3 shadow-lg shadow-black/20">
+                      <div className="flex items-center justify-between">
+                        <p className="text-zinc-300 text-sm font-semibold">Blogger OAuth credentials are saved.</p>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400">
+                          <CheckCircle2 className="w-3 h-3" /> Active
+                        </span>
                       </div>
-
+                      {settings.blogger_client_id && (
+                        <p className="text-xs text-zinc-500 font-mono">Client ID: {settings.blogger_client_id.slice(0, 20)}…</p>
+                      )}
+                      {settings.blogger_refresh_token && (
+                        <p className="text-xs text-zinc-500 font-mono">
+                          Refresh token: {settings.blogger_refresh_token.slice(0, 12)}…{settings.blogger_refresh_token.slice(-6)}
+                          {' '}
+                          <span className="text-zinc-600">({settings.blogger_refresh_token.length} chars)</span>
+                        </p>
+                      )}
+                      <div className="flex items-center gap-3 pt-1">
+                        <button
+                          onClick={async () => { const res = await fetch('/api/blogger/available-accounts'); if (!res.ok) { const payload = await res.json().catch(() => ({})); alert(payload.error || 'Unable to fetch Blogger accounts'); return; } const blogs = await res.json(); alert(`Fetched ${Array.isArray(blogs) ? blogs.length : 0} Blogger account(s). Open Blogger Accounts page to connect them.`); }}
+                          className="text-emerald-400 hover:text-emerald-300 text-sm font-bold"
+                        >
+                          Test & Fetch Blogs
+                        </button>
+                        <button
+                          onClick={() => {
+                            deleteSettingField('blogger_client_id');
+                            deleteSettingField('blogger_client_secret');
+                            deleteSettingField('blogger_refresh_token');
+                          }}
+                          className="text-rose-400 hover:text-rose-300 text-sm font-bold"
+                        >
+                          Delete All
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="p-10 text-center text-zinc-600 italic border border-dashed border-zinc-800 rounded-2xl">No Blogger OAuth credentials saved yet.</div>
