@@ -991,7 +991,47 @@ const Scheduler = ({ type }: { type: 'blog' | 'video' }) => {
                       </span>
                     </div>
                     <p className="text-[11px] text-zinc-600 mt-2">Created: {new Date(s.created_at).toLocaleString()}</p>
-                    <p className="text-[11px] mt-1 text-zinc-500">Last Run: {s.metadata?.last_execution_status || 'Not executed yet'}</p>
+                    {/* ── Status badge + full error detail ── */}
+                    {(() => {
+                      const raw: string = s.metadata?.last_execution_status || '';
+                      const lastAt: string = s.metadata?.last_executed_at || s.metadata?.last_run_at || '';
+                      if (!raw) return (
+                        <span className="inline-flex items-center gap-1 mt-1.5 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-500">
+                          <Clock className="w-3 h-3" /> Not executed yet
+                        </span>
+                      );
+                      const isSuccess = raw.startsWith('success');
+                      const isRunning = raw === 'running';
+                      const isFailed  = raw.startsWith('failed');
+                      const badgeCls = isSuccess
+                        ? 'bg-emerald-500/15 text-emerald-400'
+                        : isRunning
+                          ? 'bg-amber-500/15 text-amber-400'
+                          : 'bg-rose-500/15 text-rose-400';
+                      const BadgeIcon = isSuccess ? CheckCircle2 : isRunning ? RefreshCw : XCircle;
+                      // For failures, extract the detail after "failed: "
+                      const detail = isFailed ? raw.replace(/^failed:\s*/i, '') : (isSuccess ? raw.replace(/^success:\s*/i, '') : '');
+                      return (
+                        <div className="mt-1.5 space-y-1">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${badgeCls}`}>
+                              <BadgeIcon className={`w-3 h-3 ${isRunning ? 'animate-spin' : ''}`} />
+                              {isSuccess ? 'Published' : isRunning ? 'Running…' : 'Failed'}
+                            </span>
+                            {lastAt && (
+                              <span className="text-[10px] text-zinc-600">
+                                {new Date(lastAt).toLocaleString()}
+                              </span>
+                            )}
+                          </div>
+                          {detail && (
+                            <p className={`text-[10px] leading-snug max-w-sm break-words ${isFailed ? 'text-rose-400/80' : 'text-emerald-400/80'}`}>
+                              {detail}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
