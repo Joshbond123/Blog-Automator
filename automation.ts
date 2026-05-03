@@ -2311,7 +2311,7 @@ async function publishToFacebook(pageId: string, accessToken: string, message: s
       access_token: accessToken,
     });
     const res = await axios.post(
-      `https://graph.facebook.com/v19.0/${pageId}/photos`,
+      `https://graph.facebook.com/v22.0/${pageId}/photos`,
       body.toString(),
       outboundConfig({ headers: formHeaders, timeout: 60000 }),
     );
@@ -2325,7 +2325,7 @@ async function publishToFacebook(pageId: string, accessToken: string, message: s
     access_token: accessToken,
   });
   const res = await axios.post(
-    `https://graph.facebook.com/v19.0/${pageId}/feed`,
+    `https://graph.facebook.com/v22.0/${pageId}/feed`,
     body.toString(),
     outboundConfig({ headers: formHeaders, timeout: 60000 }),
   );
@@ -2351,7 +2351,7 @@ async function verifyFacebookPostExists(pageId: string, accessToken: string, ret
   for (const id of candidateIds) {
     try {
       const res = await axios.get(
-        `https://graph.facebook.com/v19.0/${id}`,
+        `https://graph.facebook.com/v22.0/${id}`,
         outboundConfig({
           params: { fields: 'id,is_published,permalink_url,from', access_token: accessToken },
           timeout: 20000,
@@ -2705,7 +2705,7 @@ async function runBlogAutomationInner(scheduleId: string) {
               // reliable with application/x-www-form-urlencoded than JSON body.
               const commentBody = new URLSearchParams({ message, access_token: fbPage.access_token });
               await axios.post(
-                `https://graph.facebook.com/v19.0/${fbPostId}/comments`,
+                `https://graph.facebook.com/v22.0/${fbPostId}/comments`,
                 commentBody.toString(),
                 outboundConfig({ headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 30000 }),
               );
@@ -3105,7 +3105,7 @@ async function publishVideoToFacebook(pageId: string, accessToken: string, video
   formData.append('access_token', accessToken);
 
   const res = await axios.post(
-    `https://graph-video.facebook.com/v19.0/${pageId}/videos`,
+    `https://graph-video.facebook.com/v22.0/${pageId}/videos`,
     formData,
     outboundConfig({
       headers: formData.getHeaders(),
@@ -3368,7 +3368,7 @@ async function runVideoAutomationInner(supabase: any, schedule: any, scheduleId:
     try {
       const engComment = await generateVideoEngagementComment(topic, niche, blogUrl);
       await axios.post(
-        `https://graph.facebook.com/v19.0/${videoId}/comments`,
+        `https://graph.facebook.com/v22.0/${videoId}/comments`,
         { message: engComment, access_token: fbPage.access_token },
         outboundConfig({ timeout: 30000 }),
       );
