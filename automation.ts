@@ -49,7 +49,7 @@ const LEGACY_IMAGE_MODELS = new Set([
   '@cf/black-forest-labs/flux-2-dev',
   '@cf/leonardo/phoenix-1.0',
 ]);
-const CEREBRAS_TEXT_MODEL = 'gpt-oss-120b';
+const CEREBRAS_TEXT_MODEL = 'llama-3.3-70b';
 
 type KeyUsage = {
   key: string;
@@ -1884,9 +1884,9 @@ type BloggerAuthBundle = {
 
 async function loadBloggerOAuthCredentials() {
   const settings = await getSettings();
-  const clientId = decryptSecret(settings.blogger_client_id);
-  const clientSecret = decryptSecret(settings.blogger_client_secret);
-  const refreshToken = decryptSecret(settings.blogger_refresh_token);
+  const clientId = String(settings.blogger_client_id || '').trim();
+  const clientSecret = String(settings.blogger_client_secret || '').trim();
+  const refreshToken = String(settings.blogger_refresh_token || '').trim();
 
   if (!clientId || !clientSecret || !refreshToken) {
     throw new Error('Blogger OAuth credentials are missing in Supabase settings.');
