@@ -19,7 +19,7 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
 
-  const SECRET_SETTING_FIELDS = ["blogger_client_id", "blogger_client_secret", "blogger_refresh_token"] as const;
+  const SECRET_SETTING_FIELDS: readonly string[] = []; // Blogger credentials stored as plaintext (protected by Supabase service role access)
   const ARRAY_SETTING_FIELDS = new Set(["cloudflare_configs", "unrealspeech_keys", "cerebras_keys", "lightning_keys"]);
   const SETTINGS_FIELDS = new Set([
     "supabase_url", "supabase_service_role_key", "supabase_access_token", "github_pat",
@@ -903,7 +903,7 @@ async function startServer() {
   app.get("/api/recent-posts", async (req, res) => {
     try {
       const supabase = getSupabase();
-      const { data, error } = await supabase.from("posts").select("*").order("published_at", { ascending: false }).limit(8);
+      const { data, error } = await supabase.from("posts").select("*").eq("status", "published").order("published_at", { ascending: false }).limit(8);
       if (error) return res.status(500).json({ error: error.message });
       res.json(data);
     } catch (err: any) {
