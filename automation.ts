@@ -49,7 +49,7 @@ const LEGACY_IMAGE_MODELS = new Set([
   '@cf/black-forest-labs/flux-2-dev',
   '@cf/leonardo/phoenix-1.0',
 ]);
-const CEREBRAS_TEXT_MODEL = 'qwen-3-235b-a22b-instruct-2507';
+const CEREBRAS_TEXT_MODEL = 'gpt-oss-120b';
 
 type KeyUsage = {
   key: string;
@@ -407,7 +407,7 @@ async function generateText(prompt: string, niche: string) {
         {
           model: CEREBRAS_TEXT_MODEL,
           temperature: 0.7,
-          max_completion_tokens: 2048,
+          max_completion_tokens: 8192,
           messages: [
             { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
             { role: 'user', content: prompt }
