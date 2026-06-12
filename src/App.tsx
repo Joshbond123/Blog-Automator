@@ -252,9 +252,6 @@ const Dashboard = () => {
       <section className="bg-zinc-900 border border-zinc-800 rounded-3xl overflow-hidden shadow-xl">
         <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
           <h3 className="text-xl font-bold text-white">Recent Posts</h3>
-          <button className="text-indigo-400 hover:text-indigo-300 text-sm font-medium flex items-center gap-1">
-            View all <ChevronRight className="w-4 h-4" />
-          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left">
