@@ -2236,31 +2236,33 @@ async function syncRenderScriptToGithub(repo: string, token: string) {
 // AI-generated viral CTA per video. Always includes the required phrases:
 // "check link in comments" and a like/share/follow ask.
 async function generateVideoCTA(topic: string, niche: string): Promise<string> {
-  const fallback = 'LIKE, SHARE & FOLLOW — CHECK LINK IN COMMENTS!';
-  try {
-    const raw = await generateText(
-      `Write ONE viral short-form-video CTA (call to action) for a video about "${topic}" in the ${niche} niche.
+    const fallback = 'LIKE & FOLLOW — FULL STORY IN COMMENTS';
+    try {
+      const raw = await generateText(
+        `Write ONE punchy, topic-specific CTA for a viral short-form video about "${topic}" in the ${niche} niche.
 
-REQUIREMENTS:
-- ALL CAPS
-- 8 to 14 words MAX (must fit on screen)
-- Punchy, urgent, emotional energy
-- MUST include the phrase "CHECK LINK IN COMMENTS"
-- MUST also include a like/share/follow ask (e.g. "LIKE, SHARE & FOLLOW")
-- No hashtags, no quotes, no emojis
-Return ONLY the CTA text, nothing else.`,
-      niche,
-    );
-    let text = String(raw || '').trim().replace(/^["'`]+|["'`]+$/g, '').toUpperCase();
-    if (!/CHECK LINK IN COMMENTS/.test(text)) text = `${text} — CHECK LINK IN COMMENTS`;
-    if (!/(LIKE|SHARE|FOLLOW)/.test(text)) text = `LIKE, SHARE & FOLLOW — ${text}`;
-    // Hard cap so it always fits on screen
-    if (text.length > 90) text = text.slice(0, 87) + '...';
-    return text || fallback;
-  } catch {
-    return fallback;
+  REQUIREMENTS:
+  - ALL CAPS
+  - 8 to 12 words MAX — must fit on a single screen line in large text
+  - Sound like a real creator, NOT a generic template
+  - Reference the topic energy or niche — not just "like and share"
+  - MUST include at least one of: LIKE, SHARE, FOLLOW
+  - MUST include "LINK IN COMMENTS" or "COMMENTS" (for the blog link)
+  - No hashtags, no emojis, no ellipsis, no trailing punctuation
+  - Forbidden openers: "YOU WON'T BELIEVE", "CLICK HERE", "SUBSCRIBE NOW"
+  Return ONLY the CTA text, nothing else.`,
+        niche,
+      );
+      let text = String(raw || '').trim().replace(/^["'`]+|["'`]+$/g, '').toUpperCase();
+      text = text.replace(/[!?.]+$/, '').trim();
+      if (!/(LINK IN COMMENTS|CHECK COMMENTS|COMMENTS)/.test(text)) text = `${text} — LINK IN COMMENTS`;
+      if (!/(LIKE|SHARE|FOLLOW)/.test(text)) text = `FOLLOW FOR MORE — ${text}`;
+      if (text.length > 90) text = text.split(/\s+/).slice(0, 12).join(' ');
+      return text || fallback;
+    } catch {
+      return fallback;
+    }
   }
-}
 
 async function dispatchTitleOverlayWorkflow(repo: string, token: string, sourceImageUrl: string, sourceImagePath: string, title: string, imgbbApiKey: string) {
   const { owner, name } = parseGithubRepo(repo);
@@ -2926,9 +2928,10 @@ Niche: ${niche}
 
 REQUIREMENTS:
 - voiceover: EXACTLY 135-150 words of natural spoken narration so it lands at ~55-60 seconds when read at a normal pace. NEVER fewer than 130 words and NEVER more than 155 words.
-  • Open with a 5-7 word HOOK that creates instant curiosity (no "Did you know", no "Have you ever").
-  • Deliver 3-4 specific, surprising facts in conversational TikTok/Reels energy.
-  • The LAST 12-18 words MUST be a spoken CTA that says (in your own natural words): like the video, share it with someone, follow the page, and visit the blog link in the comments for the full story / more posts. The CTA must sound human and energetic — not robotic.
+  • Open with a 5-7 word HOOK — start mid-scene with action or a reveal. FORBIDDEN openers: "Did you know", "Have you ever", "Today we", "Let me tell you".
+    • Build momentum: deliver 3-4 specific, surprising facts or story beats in conversational TikTok/Reels energy. Vary sentence length — short punchy lines, then one longer payoff.
+    • At ~80% through: drop ONE natural engagement question the viewer can answer in comments (e.g. "What would you have done?", "Sound familiar?"). Blend it seamlessly into the narration.
+    • FINAL 10-15 words: spoken CTA — energetic and human. Tell viewers to like, share with a friend, follow the page, and check the blog link in the comments. Sound like a real creator, not a robot.
 - scenes: exactly 5 scene descriptions. Each must be a DETAILED image generation prompt. Cinematic, realistic, NO TEXT, NO WORDS, NO SIGNS, NO LETTERS in the image.
 - hashtags: exactly 5 SHORT viral hashtags. EACH tag is ONE short word (max 12 letters after the #). Never join multiple words into one tag. Examples of GOOD tags: #Tech #AI #Viral #Tips #Facts #Trending #Food #Recipe. Examples of BAD tags (forbidden): #StoryBehindTheIce #DiscoveryAlertWatch #DeepDiveStory.
 
@@ -3039,35 +3042,37 @@ async function generateVoiceoverWithTimestamps(text: string): Promise<{ buffer: 
 }
 
 async function dispatchVideoRenderWorkflow(
-  repo: string,
-  token: string,
-  voiceoverPath: string,
-  scenePaths: string[],
-  wordTimestamps: WordTimestamp[],
-  title: string,
-  correlationId: string,
-  cta: string,
-  hookText: string,
-) {
-  const { owner, name } = parseGithubRepo(repo);
-  await axios.post(
-    `https://api.github.com/repos/${owner}/${name}/dispatches`,
-    {
-      event_type: 'render_video',
-      client_payload: {
-        voiceoverPath,
-        scenePaths: JSON.stringify(scenePaths),
-        wordTimestamps: JSON.stringify(wordTimestamps),
-        title,
-        correlationId,
-        cta,
-        hookText,
+    repo: string,
+    token: string,
+    voiceoverPath: string,
+    scenePaths: string[],
+    wordTimestamps: WordTimestamp[],
+    title: string,
+    correlationId: string,
+    cta: string,
+    hookText: string,
+    engagementText: string,
+  ) {
+    const { owner, name } = parseGithubRepo(repo);
+    await axios.post(
+      `https://api.github.com/repos/${owner}/${name}/dispatches`,
+      {
+        event_type: 'render_video',
+        client_payload: {
+          voiceoverPath,
+          scenePaths: JSON.stringify(scenePaths),
+          wordTimestamps: JSON.stringify(wordTimestamps),
+          title,
+          correlationId,
+          cta,
+          hookText,
+          engagementText,
+        },
       },
-    },
-    outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
-  );
-  console.log(`[video] Dispatched render_video workflow: ${correlationId} (engine=remotion, cta="${cta}")`);
-}
+      outboundConfig({ headers: githubHeaders(token), timeout: 30000 }),
+    );
+    console.log(`[video] Dispatched render_video workflow: ${correlationId} (engine=remotion, cta="${cta}")`);
+  }
 
 async function waitForVideoRenderArtifact(repo: string, token: string, correlationId: string): Promise<{ videoBuffer: Buffer; result: any }> {
   const { owner, name } = parseGithubRepo(repo);
@@ -3169,6 +3174,31 @@ async function publishVideoToFacebook(pageId: string, accessToken: string, video
   console.log(`[video] Facebook video posted: ${videoId}`);
   return videoId;
 }
+async function generateVideoEngagementQuestion(topic: string, niche: string): Promise<string> {
+  const fallback = 'WHAT WOULD YOU HAVE DONE?';
+  try {
+    const raw = await generateText(
+      `Write ONE short, curiosity-driven question for a viral short-form video about: "${topic}" in the ${niche} niche.
+
+REQUIREMENTS:
+- 5 to 9 words MAX — must fit on one line in large text on screen
+- Should be genuinely thought-provoking — something viewers can actually answer in comments
+- Feels personal and natural, not rhetorical or generic
+- GOOD: "What would you have done?", "Have you ever seen this?", "Would you believe it?"
+- BAD: "What do you think about this?" (too generic)
+- No hashtags, no emojis — return only the question text without a question mark
+Return ONLY the question text (no punctuation).`,
+      niche,
+    );
+    let text = String(raw || '').trim().replace(/^["'`]+|["'`]+$/g, '').replace(/\?+$/, '').trim();
+    if (!text || text.split(/\s+/).length < 3) return fallback;
+    if (text.split(/\s+/).length > 10) text = text.split(/\s+/).slice(0, 9).join(' ');
+    return `${text}?`;
+  } catch {
+    return fallback;
+  }
+}
+
 
 async function generateVideoEngagementComment(topic: string, niche: string, blogUrl?: string): Promise<string> {
   const fallback = blogUrl
@@ -3370,22 +3400,30 @@ async function runVideoAutomationInner(supabase: any, schedule: any, scheduleId:
     await syncRenderScriptToGithub(githubRepo, githubPat);
     const correlationId = `video-${ts}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // AI-generated viral CTA + short attention-grabbing hook for the first 2s
-    const ctaText = await generateVideoCTA(topic, niche);
-    const hookWords = voiceover.split(/\s+/).filter(Boolean).slice(0, 6).join(' ');
-    const hookText = (hookWords || topic).toUpperCase().slice(0, 60);
+    // AI-generated viral CTA, hook, and in-video engagement question (parallel for speed)
+      const [ctaText, engagementText] = await Promise.all([
+        generateVideoCTA(topic, niche),
+        generateVideoEngagementQuestion(topic, niche),
+      ]);
+      // Extract the first natural phrase of the voiceover as the visual opening hook
+      const hookSentence = voiceover.match(/^[^,;.!?]{10,55}/)?.[0]?.trim() || '';
+      const hookText = (hookSentence || voiceover.split(/\s+/).filter(Boolean).slice(0, 7).join(' ') || topic)
+        .toUpperCase().slice(0, 60);
+      console.log(`[video] CTA: "${ctaText}" | Engagement Q: "${engagementText}"`);
 
-    await dispatchVideoRenderWorkflow(
-      githubRepo,
-      githubPat,
-      voicePath,
-      scenePaths,
-      wordTimestamps,
-      topic,
-      correlationId,
-      ctaText,
-      hookText,
-    );
+      await dispatchVideoRenderWorkflow(
+        githubRepo,
+        githubPat,
+        voicePath,
+        scenePaths,
+        wordTimestamps,
+        topic,
+        correlationId,
+        ctaText,
+        hookText,
+        engagementText,
+      );
+  
 
     // ── 10. Poll until video render completes and download artifact
     console.log(`[video] Waiting for render workflow to complete (correlationId=${correlationId})...`);

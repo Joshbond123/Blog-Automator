@@ -165,6 +165,7 @@ async function main() {
     String(process.env.CTA_TEXT || "").trim() ||
     "LIKE, SHARE & FOLLOW — CHECK LINK IN BIO";
   const hookText = String(process.env.HOOK_TEXT || title || "").trim().slice(0, 60);
+  const engagementText = String(process.env.ENGAGEMENT_TEXT || "").trim().slice(0, 80);
 
   console.log(`[render-video] correlationId=${correlationId}`);
   console.log(`[render-video] scenes=${scenePaths.length} words=${wordTimestamps.length}`);
@@ -229,6 +230,7 @@ async function main() {
     durationInSeconds: voiceDuration,
     cta: ctaText,
     hookText,
+    engagementText,
   };
   const propsFile = join(REMOTION_DIR, "input-props.json");
   await fs.writeFile(propsFile, JSON.stringify(inputProps, null, 2), "utf8");
