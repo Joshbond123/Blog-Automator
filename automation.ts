@@ -1619,15 +1619,19 @@ async function acquireUniqueViralTopic(
     try {
       viralTitle = await rewriteToViralTitle(rawCandidate, niche);
     } catch (err: any) {
-      const status = Number(err?.response?.status || 0);
-      if (status === 429) {
-        console.warn(`${tag} Title rewriter rate-limited; falling back to raw candidate as title.`);
-        viralTitle = rawCandidate;
-      } else {
-        // Real technical error — propagate, do NOT silently retry.
-        throw err;
+        const status = Number(err?.response?.status || 0);
+        // Treat rate-limits (429), model-not-found (404), server errors (5xx), and
+        // network/validation failures (status 0) as non-fatal: use the raw trending
+        // candidate as the viral title so the automation continues rather than aborting.
+        if (status === 429 || status === 404 || status >= 500 || !status) {
+          const reason = status === 429 ? 'rate-limited' : status === 404 ? 'model unavailable (404)' : status >= 500 ? `server error (${status})` : 'network/validation error';
+          console.warn(`${tag} Title rewriter ${reason}; falling back to raw candidate as title. err=${err?.message || err}`);
+          viralTitle = rawCandidate;
+        } else {
+          // Unexpected client error (e.g. 400, 401) — propagate so the operator can fix credentials.
+          throw err;
+        }
       }
-    }
 
     const normalizedViral = viralTitle.toLowerCase().trim();
     if (seenViralTitles.has(normalizedViral)) {
