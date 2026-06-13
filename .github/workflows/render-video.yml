@@ -51,6 +51,7 @@ jobs:
           TITLE_TEXT: ${{ github.event.client_payload.title }}
           CTA_TEXT: ${{ github.event.client_payload.cta }}
           HOOK_TEXT: ${{ github.event.client_payload.hookText }}
+          ENGAGEMENT_TEXT: ${{ github.event.client_payload.engagementText }}
           CORRELATION_ID: ${{ github.event.client_payload.correlationId }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/render-video.mjs
