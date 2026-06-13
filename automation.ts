@@ -49,7 +49,10 @@ const LEGACY_IMAGE_MODELS = new Set([
   '@cf/black-forest-labs/flux-2-dev',
   '@cf/leonardo/phoenix-1.0',
 ]);
-const CEREBRAS_TEXT_MODEL = 'llama-3.3-70b';
+// Primary model - gpt-oss-120b is the current active model on Cerebras (June 2025)
+  // Fallback: zai-glm-4.7 used if primary returns 404 (model unavailable)
+  const CEREBRAS_TEXT_MODEL = 'gpt-oss-120b';
+  const CEREBRAS_FALLBACK_MODEL = 'zai-glm-4.7';
 
 type KeyUsage = {
   key: string;
@@ -402,29 +405,60 @@ async function generateText(prompt: string, niche: string) {
       await sleep(waitMs);
     }
     try {
-      const res = await axios.post(
-        'https://api.cerebras.ai/v1/chat/completions',
-        {
-          model: CEREBRAS_TEXT_MODEL,
-          temperature: 0.7,
-          max_completion_tokens: 8192,
-          messages: [
-            { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
-            { role: 'user', content: prompt }
-          ]
-        },
-        outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 45000 })
-      );
+      // Try primary model first; fall back to CEREBRAS_FALLBACK_MODEL on 404 (model unavailable/renamed)
+      let activeModel = CEREBRAS_TEXT_MODEL;
+      let res: any;
+      try {
+        res = await axios.post(
+          'https://api.cerebras.ai/v1/chat/completions',
+          {
+            model: activeModel,
+            temperature: 0.7,
+            max_completion_tokens: 8192,
+            messages: [
+              { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
+              { role: 'user', content: prompt }
+            ]
+          },
+          outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 45000 })
+        );
+      } catch (primaryErr: any) {
+        const primaryStatus = Number(primaryErr?.response?.status || 0);
+        if (primaryStatus === 404) {
+          // Primary model no longer available on Cerebras — auto-switch to fallback
+          console.warn(`[automation] Cerebras model "${activeModel}" not found (HTTP 404). Switching to fallback "${CEREBRAS_FALLBACK_MODEL}". Update CEREBRAS_TEXT_MODEL when possible.`);
+          activeModel = CEREBRAS_FALLBACK_MODEL;
+          res = await axios.post(
+            'https://api.cerebras.ai/v1/chat/completions',
+            {
+              model: activeModel,
+              temperature: 0.7,
+              max_completion_tokens: 8192,
+              messages: [
+                { role: 'system', content: `You are a professional content creator for the ${niche} niche. Generate engaging, high-quality content.` },
+                { role: 'user', content: prompt }
+              ]
+            },
+            outboundConfig({ headers: { Authorization: `Bearer ${selected.key}`, 'Content-Type': 'application/json' }, timeout: 45000 })
+          );
+        } else {
+          throw primaryErr;
+        }
+      }
 
       await trackKeyUsage('cerebras_keys', 'cerebras_rotation_index', selected.key, true);
       const content = String(res.data?.choices?.[0]?.message?.content || '').trim();
       if (!content) throw new Error('Cerebras text response was empty.');
-      console.log(`[automation] Cerebras text key used: ${keyFingerprint(selected.key)} model=${CEREBRAS_TEXT_MODEL}`);
+      console.log(`[automation] Cerebras text key used: ${keyFingerprint(selected.key)} model=${activeModel}`);
       return content;
     } catch (err: any) {
       lastError = err;
       await trackKeyUsage('cerebras_keys', 'cerebras_rotation_index', selected.key, false);
       const status = Number(err?.response?.status || 0);
+      if (status === 404) {
+        const errMsg = String(err?.response?.data?.message || err?.message || '');
+        console.error(`[automation] Cerebras model not found (HTTP 404): ${errMsg}. Both "${CEREBRAS_TEXT_MODEL}" and fallback "${CEREBRAS_FALLBACK_MODEL}" may be unavailable. Check https://api.cerebras.ai/v1/models for current model list.`);
+      }
       if (status === 429 || status === 503) {
         // Mark rate-limited for 60s (not 180s) so future runs aren't blocked as long
         markCerebrasRateLimited(selected.key, 60_000);
